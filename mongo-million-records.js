@@ -15,12 +15,16 @@ config.mongo.collection = 'MassBooks';
 const timer = new Timer();
 const csvOutputPath = path.join(config.paths.tmpDir, 'old_books.csv');
 
+// Check for reduced data flag
+const useReducedData = process.argv.includes('--reduced-data');
+const RECORD_COUNT = useReducedData ? 100000 : 1000000;
+
 async function run() {
   timer.start('total');
 
   try {
-    // Step 1: Generate and insert 1,000,000 books in MongoDB
-    console.log("🔵 Step 1: Generating 1,000,000 book records in MongoDB...");
+    // Step 1: Generate and insert records in MongoDB
+    console.log(`🔵 Step 1: Generating ${RECORD_COUNT} book records in MongoDB...`);
     await generateMillionRecords();
     
     // Step 2: Export only ISBN, year, pages fields to CSV
@@ -46,48 +50,71 @@ async function generateMillionRecords() {
   timer.start('generate_million_mongodb');
   
   try {
-    const client = new MongoClient(config.mongo.uri);
-    await client.connect();
+    // Check if we can connect to MongoDB first
+    console.log("Testing MongoDB connection...");
+    const client = new MongoClient(config.mongo.uri, {
+      ...config.mongo.options,
+      serverSelectionTimeoutMS: 5000 // Shorter timeout for initial connection test
+    });
     
-    const db = client.db(config.mongo.database);
-    const collection = db.collection(config.mongo.collection);
-    
-    // Drop collection if it exists
     try {
-      await collection.drop();
-      console.log("Collection dropped");
-    } catch (err) {
-      // Ignore if collection doesn't exist
-    }
-    
-    const batchSize = 10000;
-    const totalRecords = 1000000;
-    let inserted = 0;
-    
-    console.log("Generating and inserting records in batches...");
-    
-    while (inserted < totalRecords) {
-      const batch = [];
-      const currentBatchSize = Math.min(batchSize, totalRecords - inserted);
+      await client.connect();
+      console.log("MongoDB connection successful");
       
-      // Generate batch of books
-      for (let i = 0; i < currentBatchSize; i++) {
-        batch.push({
-          ISBN: generateISBN(),
-          year: randomNumber(1900, 2023),
-          pages: randomNumber(50, 1500)
-        });
+      const db = client.db(config.mongo.database);
+      const collection = db.collection(config.mongo.collection);
+      
+      // Drop collection if it exists
+      try {
+        await collection.drop();
+        console.log("Collection dropped");
+      } catch (err) {
+        // Ignore if collection doesn't exist
+        console.log("Collection didn't exist or couldn't be dropped");
       }
       
-      // Insert batch
-      await collection.insertMany(batch);
-      inserted += currentBatchSize;
+      const batchSize = 5000;
+      const totalRecords = RECORD_COUNT;
+      let inserted = 0;
       
-      // Log progress
-      console.log(`Inserted ${inserted} of ${totalRecords} records`);
+      console.log(`Generating and inserting ${totalRecords} records in batches of ${batchSize}...`);
+      
+      while (inserted < totalRecords) {
+        const batch = [];
+        const currentBatchSize = Math.min(batchSize, totalRecords - inserted);
+        
+        // Generate batch of books
+        for (let i = 0; i < currentBatchSize; i++) {
+          batch.push({
+            ISBN: generateISBN(),
+            year: randomNumber(1900, 2023),
+            pages: randomNumber(50, 1500)
+          });
+        }
+        
+        // Insert batch
+        await collection.insertMany(batch);
+        inserted += currentBatchSize;
+        
+        // Log progress
+        console.log(`Inserted ${inserted} of ${totalRecords} records`);
+      }
+      
+      console.log(`Successfully generated and inserted ${totalRecords} book records`);
+      
+    } catch (error) {
+      console.error("MongoDB connection test failed:", error);
+      console.log(`
+      Please run 'node setup-credentials.js' to configure your MongoDB connection
+      or try setting the connection URL directly:
+      
+      For MongoDB without auth:    mongodb://localhost:27018/LibrosAutores
+      For MongoDB with auth:       mongodb://username:password@localhost:27018/LibrosAutores
+      `);
+      throw new Error("MongoDB connection failed");
+    } finally {
+      await client.close();
     }
-    
-    console.log(`Successfully generated and inserted ${totalRecords} book records`);
     
   } catch (error) {
     console.error("Error generating million records:", error);
@@ -100,7 +127,7 @@ async function exportFieldsToCSV() {
   timer.start('export_to_csv');
   
   try {
-    const client = new MongoClient(config.mongo.uri);
+    const client = new MongoClient(config.mongo.uri, config.mongo.options);
     await client.connect();
     
     const db = client.db(config.mongo.database);
@@ -144,6 +171,7 @@ async function exportFieldsToCSV() {
     
   } catch (error) {
     console.error("Error exporting to CSV:", error);
+    console.error("TIP: Run 'node setup-credentials.js' to configure your database connections");
   } finally {
     timer.end('export_to_csv');
   }
@@ -177,15 +205,49 @@ async function importToMySQLOldBooks() {
     
     console.log("Created old_books table");
     
-    // Import from CSV
-    await connection.query(`
-      LOAD DATA INFILE ?
-      INTO TABLE old_books
-      FIELDS TERMINATED BY ',' ENCLOSED BY '"'
-      LINES TERMINATED BY '\n'
-      IGNORE 1 ROWS
-      (ISBN, year, pages)
-    `, [csvOutputPath]);
+    // Determine if we need to copy to secure file path
+    let finalCsvPath = csvOutputPath;
+    let usedSecureDir = false;
+    
+    try {
+      // Try using LOAD DATA INFILE directly first
+      await connection.query(`
+        LOAD DATA INFILE ?
+        INTO TABLE old_books
+        FIELDS TERMINATED BY ',' ENCLOSED BY '"'
+        LINES TERMINATED BY '\n'
+        IGNORE 1 ROWS
+        (ISBN, year, pages)
+      `, [csvOutputPath]);
+    } catch (err) {
+      if (err.code === 'ER_OPTION_PREVENTS_STATEMENT') {
+        // If secure_file_priv restriction prevents direct loading, use our helper
+        console.log("Direct file access restricted, using secure directory...");
+        const fileHelper = require('./utils/file-helper');
+        finalCsvPath = fileHelper.copyToSecureFileDir(csvOutputPath);
+        usedSecureDir = true;
+        
+        // Try again with the new file location
+        await connection.query(`
+          LOAD DATA INFILE ?
+          INTO TABLE old_books
+          FIELDS TERMINATED BY ',' ENCLOSED BY '"'
+          LINES TERMINATED BY '\n'
+          IGNORE 1 ROWS
+          (ISBN, year, pages)
+        `, [finalCsvPath]);
+      } else {
+        // If it's some other error, fallback to manual batch inserts
+        console.log("LOAD DATA INFILE failed, using batch inserts instead...");
+        await insertCSVUsingBatch(csvOutputPath, connection);
+      }
+    }
+    
+    // Clean up the secure directory file if we created one
+    if (usedSecureDir) {
+      const fileHelper = require('./utils/file-helper');
+      fileHelper.deleteFromSecureFileDir(path.basename(csvOutputPath));
+    }
     
     // Get count of imported rows
     const [rows] = await connection.query(`SELECT COUNT(*) as count FROM old_books`);
@@ -198,6 +260,57 @@ async function importToMySQLOldBooks() {
   } finally {
     timer.end('import_to_mysql');
   }
+}
+
+// Helper function to insert CSV using batch inserts as a fallback
+async function insertCSVUsingBatch(csvPath, existingConnection) {
+  const connection = existingConnection;
+  
+  // Read and parse CSV file
+  const fileContent = fs.readFileSync(csvPath, 'utf8');
+  const rows = fileContent.split('\n');
+  
+  // Skip header row
+  const dataRows = rows.slice(1).filter(row => row.trim());
+  
+  // Use batch inserts for better performance
+  const batchSize = 1000;
+  let insertedCount = 0;
+  
+  for (let i = 0; i < dataRows.length; i += batchSize) {
+    const batch = dataRows.slice(i, i + batchSize);
+    const values = [];
+    const placeholders = [];
+    
+    batch.forEach(row => {
+      try {
+        // Parse CSV row (simple version assuming well-formed data)
+        const parts = row.split(',');
+        const isbn = parts[0].replace(/"/g, '');
+        const year = parseInt(parts[1]);
+        const pages = parseInt(parts[2]);
+        
+        values.push(isbn, year, pages);
+        placeholders.push('(?, ?, ?)');
+      } catch (err) {
+        console.error(`Error parsing row: ${row}`, err);
+      }
+    });
+    
+    if (placeholders.length > 0) {
+      // Build query
+      const query = `INSERT INTO old_books (ISBN, year, pages) VALUES ${placeholders.join(',')}`;
+      await connection.query(query, values);
+      insertedCount += placeholders.length;
+    }
+    
+    // Log progress
+    if ((i + batchSize) >= dataRows.length || i % (batchSize * 5) === 0) {
+      console.log(`Imported ${insertedCount} of ${dataRows.length} rows...`);
+    }
+  }
+  
+  return insertedCount;
 }
 
 // Run the script
