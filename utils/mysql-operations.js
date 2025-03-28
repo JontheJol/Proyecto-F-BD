@@ -121,9 +121,110 @@ async function exportToCsv(filePath = config.paths.csvFilePath) {
     }
 }
 
+async function batchInsertFromCSV(filePath, tableName, fields, transformRow = null) {
+    console.log(`Batch inserting data from ${filePath} into ${tableName}...`);
+    
+    // Read and parse the CSV file
+    const fileContent = fs.readFileSync(filePath, 'utf8');
+    const rows = fileContent.split('\n');
+    const headers = rows[0].split(',');
+    
+    // Skip header row
+    const dataRows = rows.slice(1).filter(row => row.trim());
+    
+    if (dataRows.length === 0) {
+        console.log("No data rows found in CSV");
+        return 0;
+    }
+    
+    let connection;
+    let insertedCount = 0;
+    
+    try {
+        connection = await getConnection();
+        
+        // Use batch inserts for better performance
+        const batchSize = 1000;
+        for (let i = 0; i < dataRows.length; i += batchSize) {
+            const batch = dataRows.slice(i, i + batchSize);
+            const values = [];
+            const placeholders = [];
+            
+            batch.forEach(row => {
+                try {
+                    const rowData = parseCSVRow(row);
+                    if (transformRow) {
+                        const transformed = transformRow(rowData, headers);
+                        if (transformed) {
+                            values.push(...transformed.values);
+                            placeholders.push(`(${transformed.placeholders})`);
+                        }
+                    } else {
+                        // Default transformation: use all fields
+                        values.push(...rowData);
+                        placeholders.push(`(${Array(rowData.length).fill('?').join(',')})`);
+                    }
+                } catch (err) {
+                    console.error(`Error parsing row: ${row}`, err);
+                }
+            });
+            
+            if (placeholders.length > 0) {
+                // Build query
+                const query = `INSERT INTO ${tableName} (${fields.join(',')}) VALUES ${placeholders.join(',')}`;
+                await connection.query(query, values);
+                insertedCount += placeholders.length;
+            }
+            
+            // Log progress
+            if ((i + batchSize) >= dataRows.length || i % (batchSize * 5) === 0) {
+                console.log(`Imported ${insertedCount} of ${dataRows.length} rows...`);
+            }
+        }
+        
+        return insertedCount;
+    } catch (error) {
+        console.error(`Error batch inserting from CSV: ${error.message}`);
+        throw error;
+    } finally {
+        if (connection) await connection.end();
+    }
+}
+
+// Helper function to parse CSV row, handling quoted values
+function parseCSVRow(row) {
+    const result = [];
+    let current = '';
+    let inQuotes = false;
+    
+    for (let i = 0; i < row.length; i++) {
+        const char = row[i];
+        
+        if (char === '"') {
+            // Handle escaped quotes (two double quotes in a row)
+            if (inQuotes && i + 1 < row.length && row[i + 1] === '"') {
+                current += '"';
+                i++; // Skip the next quote
+            } else {
+                inQuotes = !inQuotes;
+            }
+        } else if (char === ',' && !inQuotes) {
+            result.push(current);
+            current = '';
+        } else {
+            current += char;
+        }
+    }
+    
+    // Add the last field
+    result.push(current);
+    return result;
+}
+
 module.exports = {
     setupDatabase,
     insertData,
     fetchData,
-    exportToCsv
+    exportToCsv,
+    batchInsertFromCSV
 };

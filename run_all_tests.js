@@ -4,44 +4,73 @@ const fs = require('fs');
 
 console.log('🚀 Starting Database Project Tests');
 
+// Check if the user wants to skip permission tests
+const skipUserSetup = process.argv.includes('--skip-user-setup');
+const skipMemoryIntensive = process.argv.includes('--skip-memory-intensive');
+
+// Increase memory limit for Node.js for memory-intensive operations
+const nodeOptions = ['--max-old-space-size=8192'];
+
 const steps = [
   {
     name: '1️⃣ Creating Database Schema',
     command: 'node',
-    args: ['./scripts/create_schema.js']
+    args: ['./scripts/create_schema.js'],
+    required: true
   },
   {
     name: '2️⃣ Setting Up Database Users',
     command: 'node',
-    args: ['./scripts/create_users.js']
+    args: ['./scripts/create_users.js'],
+    required: false,
+    skip: skipUserSetup
   },
   {
     name: '3️⃣ Running Performance Tests',
     command: 'node',
-    args: ['./performance-test.js']
+    args: [...nodeOptions, './performance-test.js', skipMemoryIntensive ? '--reduced-data' : ''],
+    required: true
   },
   {
     name: '4️⃣ Running MongoDB Million Records Test',
     command: 'node',
-    args: ['./mongo-million-records.js']
+    args: [...nodeOptions, './mongo-million-records.js', skipMemoryIntensive ? '--reduced-data' : ''],
+    required: true
   }
 ];
 
 async function runTests() {
   const startTime = Date.now();
+
+  console.log('\n⚙️ Configuration:');
+  console.log(`MySQL User: ${process.env.MYSQL_USER || 'root'}`);
+  console.log(`Database: ${process.env.MYSQL_DATABASE || 'LibrosAutores'}`);
+  console.log(`Skip User Setup: ${skipUserSetup}`);
+  console.log(`Skip Memory-Intensive Operations: ${skipMemoryIntensive}`);
+  console.log('--------------------------------------------------\n');
   
   for (const step of steps) {
+    if (step.skip) {
+      console.log(`\n\n${step.name} - SKIPPED`);
+      continue;
+    }
+
     console.log(`\n\n${step.name}`);
     console.log('==================================================');
     
-    const result = spawnSync(step.command, step.args, { 
+    const result = spawnSync(step.command, step.args.filter(Boolean), { 
       stdio: 'inherit',
       env: process.env
     });
     
     if (result.status !== 0) {
       console.error(`❌ ${step.name} failed with exit code ${result.status}`);
-      process.exit(result.status);
+      if (step.required) {
+        console.error('Required step failed. Exiting...');
+        process.exit(result.status || 1);
+      } else {
+        console.log('Continuing despite error as this step is not required...');
+      }
     }
   }
   
@@ -153,5 +182,15 @@ function generateFinalReport(totalTimeMs) {
   fs.writeFileSync('final_report.html', reportHtml);
   console.log('📊 Final report generated: final_report.html');
 }
+
+// Show usage help
+console.log(`
+Usage:
+  node run_all_tests.js [options]
+
+Options:
+  --skip-user-setup         Skip creating MySQL users (good if your user lacks privileges)
+  --skip-memory-intensive   Run with reduced data sizes to avoid memory issues
+`);
 
 runTests();

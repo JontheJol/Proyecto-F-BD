@@ -28,6 +28,13 @@ const exportedBooksCSV = path.join(tmpDir, 'exported_books.csv');
 const exportedAuthorsCSV = path.join(tmpDir, 'exported_authors.csv');
 const allAuthorLicenses = [];
 
+// Check for reduced data flag
+const useReducedData = process.argv.includes('--reduced-data');
+const BOOKS_COUNT = useReducedData ? 10000 : 100000;
+const AUTHORS_COUNT = useReducedData ? 15000 : 150000;
+const STRESS_TEST_COUNT = useReducedData ? 1000 : 3500;
+const BATCH_FILES_COUNT = useReducedData ? 10 : 100;
+
 async function getConnection(user = config.mysql.user, password = config.mysql.password) {
   return await mysql.createConnection({
     host: config.mysql.host,
@@ -41,46 +48,61 @@ async function getConnection(user = config.mysql.user, password = config.mysql.p
 async function runTests() {
   timer.start('total_performance_test');
   console.log("Starting performance tests...");
+  console.log(`Using ${useReducedData ? 'REDUCED' : 'FULL'} dataset sizes`);
   
   try {
     // First, we need to add some authors for foreign key references
     await createInitialAuthors();
     
-    // Test 1: Create 100,000 books in CSV
-    console.log("\n📊 TEST 1: Generate 100,000 books CSV");
+    // Test 1: Create 100,000 books in CSV (or reduced amount)
+    console.log(`\n📊 TEST 1: Generate ${BOOKS_COUNT} books CSV`);
     timer.start('generate_large_books_csv');
-    const books = generateBooks(100000, allAuthorLicenses);
-    const booksCSV = booksToCSV(books);
-    fs.writeFileSync(largeBookCSV, booksCSV);
+    
+    // Generate books in chunks to prevent memory issues
+    const chunkSize = 10000;
+    const chunks = Math.ceil(BOOKS_COUNT / chunkSize);
+    
+    // Create the CSV header first
+    fs.writeFileSync(largeBookCSV, 'id,isbn,title,autor_license,editorial,pages,year,genre,language,format,sinopsis,content\n');
+    
+    for (let i = 0; i < chunks; i++) {
+      const currentCount = Math.min(chunkSize, BOOKS_COUNT - (i * chunkSize));
+      console.log(`Generating chunk ${i+1}/${chunks} (${currentCount} books)`);
+      
+      const books = generateBooks(currentCount, allAuthorLicenses, i * chunkSize + 1);
+      const booksCSV = booksToCSV(books).split('\n').slice(1).join('\n');
+      fs.appendFileSync(largeBookCSV, booksCSV + '\n');
+    }
+    
     timer.end('generate_large_books_csv');
     
     // Test 2: Insert the CSV into MySQL
-    console.log("\n📊 TEST 2: Insert books CSV into MySQL");
+    console.log(`\n📊 TEST 2: Insert books CSV into MySQL`);
     await insertBooksCSVIntoMySQL(largeBookCSV);
     
-    // Test 3: Insert 3,500 books to stress test MySQL
-    console.log("\n📊 TEST 3: Stress test with 3,500 books");
+    // Test 3: Insert books to stress test MySQL
+    console.log(`\n📊 TEST 3: Stress test with ${STRESS_TEST_COUNT} books`);
     await stressTestMySQL();
     
-    // Test 4: Generate 100 CSV files with 1000 books each
-    console.log("\n📊 TEST 4: Generate 100 CSV files (1000 books each)");
+    // Test 4: Generate CSV files with 1000 books each
+    console.log(`\n📊 TEST 4: Generate ${BATCH_FILES_COUNT} CSV files (1000 books each)`);
     timer.start('generate_multiple_csv');
-    const csvFiles = generateMultipleCSV(100, 1000, 
+    const csvFiles = generateMultipleCSV(BATCH_FILES_COUNT, 1000, 
       (count) => generateBooks(count, allAuthorLicenses), 
       booksToCSV, 
       'books_batch');
     timer.end('generate_multiple_csv');
     
-    // Test 5: Insert all 100 CSV files
-    console.log("\n📊 TEST 5: Insert 100 CSV files into MySQL");
+    // Test 5: Insert all CSV files
+    console.log("\n📊 TEST 5: Insert CSV files into MySQL");
     await insertMultipleCSVFiles(csvFiles);
     
     // Test 6: Complex query for statistics
     console.log("\n📊 TEST 6: Run complex statistics query");
     await runComplexQuery();
     
-    // Test 7: Generate and insert 150,000 authors
-    console.log("\n📊 TEST 7: Generate and insert 150,000 authors");
+    // Test 7: Generate and insert authors
+    console.log(`\n📊 TEST 7: Generate and insert ${AUTHORS_COUNT} authors`);
     await generateAndInsertAuthors();
     
     // Test 8: Export tables to CSV
@@ -146,57 +168,87 @@ async function createInitialAuthors() {
 
 async function insertBooksCSVIntoMySQL(csvFilePath) {
   timer.start('insert_large_books_csv');
-  const connection = await getConnection();
   
   try {
-    // Create temporary table without foreign key constraints
-    await connection.query(`
-      CREATE TEMPORARY TABLE temp_libro (
-        id INT AUTO_INCREMENT PRIMARY KEY,
-        ISBN VARCHAR(16) NOT NULL,
-        title VARCHAR(512) NOT NULL,
-        autor_license VARCHAR(12),
-        editorial TINYTEXT,
-        pages SMALLINT,
-        year SMALLINT NOT NULL,
-        genre TINYTEXT,
-        language TINYTEXT NOT NULL,
-        format TINYTEXT,
-        sinopsis TEXT,
-        content TEXT
-      )
-    `);
+    // Use a regular table instead of a temporary table since we're using multiple connections
+    const connection = await getConnection();
     
-    // Load data from CSV
-    await connection.query(`
-      LOAD DATA INFILE ?
-      INTO TABLE temp_libro
-      FIELDS TERMINATED BY ',' ENCLOSED BY '"'
-      LINES TERMINATED BY '\n'
-      IGNORE 1 ROWS
-      (id, ISBN, title, @autor_license, editorial, pages, year, genre, language, format, sinopsis, content)
-      SET autor_license = NULLIF(@autor_license, '')
-    `, [csvFilePath]);
+    try {
+      console.log("Creating import table for books...");
+      // First drop the table if it exists
+      await connection.query(`DROP TABLE IF EXISTS import_libro`);
+      
+      // Create a regular table without foreign key constraints
+      await connection.query(`
+        CREATE TABLE import_libro (
+          id INT AUTO_INCREMENT PRIMARY KEY,
+          ISBN VARCHAR(16) NOT NULL,
+          title VARCHAR(512) NOT NULL,
+          autor_license VARCHAR(12),
+          editorial TINYTEXT,
+          pages SMALLINT,
+          year SMALLINT NOT NULL,
+          genre TINYTEXT,
+          language TINYTEXT NOT NULL,
+          format TINYTEXT,
+          sinopsis TEXT,
+          content TEXT
+        )
+      `);
+    } finally {
+      await connection.end();
+    }
     
-    // Insert from temp table to real table with validation
-    await connection.query(`
-      INSERT INTO Libro (ISBN, title, autor_license, editorial, pages, year, genre, language, format, sinopsis, content)
-      SELECT ISBN, title, autor_license, editorial, pages, year, genre, language, format, sinopsis, content
-      FROM temp_libro
-      WHERE autor_license IS NULL OR autor_license IN (SELECT license FROM Autor)
-    `);
+    // Use the batch insert function
+    const mysqlOps = require('./utils/mysql-operations');
+    const fieldNames = ['ISBN', 'title', 'autor_license', 'editorial', 'pages', 'year', 'genre', 'language', 'format', 'sinopsis', 'content'];
     
-    // Drop temp table
-    await connection.query(`DROP TEMPORARY TABLE temp_libro`);
+    // Transform function to handle autor_license NULL values
+    const transform = (rowData, headers) => {
+      const values = [];
+      const idIndex = headers.findIndex(h => h === 'id');
+      let placeholders = [];
+      
+      // Skip id column and map values for each field, handling NULL values for autor_license
+      fieldNames.forEach(field => {
+        const idx = headers.findIndex(h => h.toLowerCase() === field.toLowerCase());
+        if (idx >= 0) {
+          if (field === 'autor_license' && (!rowData[idx] || rowData[idx] === '""')) {
+            values.push(null);
+          } else {
+            values.push(rowData[idx]);
+          }
+          placeholders.push('?');
+        }
+      });
+      
+      return { values, placeholders: placeholders.join(',') };
+    };
     
-    // Get count of inserted rows
-    const [rows] = await connection.query(`SELECT COUNT(*) as count FROM Libro`);
-    console.log(`Inserted ${rows[0].count} books from CSV`);
+    await mysqlOps.batchInsertFromCSV(csvFilePath, 'import_libro', fieldNames, transform);
     
+    // Now copy from import table to actual table with validation
+    const connFinal = await getConnection();
+    try {
+      await connFinal.query(`
+        INSERT INTO Libro (ISBN, title, autor_license, editorial, pages, year, genre, language, format, sinopsis, content)
+        SELECT ISBN, title, autor_license, editorial, pages, year, genre, language, format, sinopsis, content
+        FROM import_libro
+        WHERE autor_license IS NULL OR autor_license IN (SELECT license FROM Autor)
+      `);
+      
+      // Drop import table
+      await connFinal.query(`DROP TABLE import_libro`);
+      
+      // Get count of inserted rows
+      const [rows] = await connFinal.query(`SELECT COUNT(*) as count FROM Libro`);
+      console.log(`Inserted ${rows[0].count} books from CSV`);
+    } finally {
+      await connFinal.end();
+    }
   } catch (error) {
     console.error("Error inserting books from CSV:", error);
   } finally {
-    await connection.end();
     timer.end('insert_large_books_csv');
   }
 }
@@ -206,8 +258,8 @@ async function stressTestMySQL() {
   const connection = await getConnection();
   
   try {
-    // Generate 3,500 books for stress testing
-    const stressBooks = generateBooks(3500, allAuthorLicenses);
+    // Generate books for stress testing
+    const stressBooks = generateBooks(STRESS_TEST_COUNT, allAuthorLicenses);
     
     // Use transaction for faster insertion
     await connection.beginTransaction();
@@ -253,30 +305,47 @@ async function insertMultipleCSVFiles(csvFiles) {
   timer.start('insert_multiple_csv');
   
   try {
+    const mysqlOps = require('./utils/mysql-operations');
+    const fieldNames = ['ISBN', 'title', 'autor_license', 'editorial', 'pages', 'year', 'genre', 'language', 'format', 'sinopsis', 'content'];
+    
     // Process each CSV file
+    let totalInserted = 0;
     for (let i = 0; i < csvFiles.length; i++) {
       const csvFile = csvFiles[i];
       
-      // Insert this CSV
-      const connection = await getConnection();
+      // Transform function for handling autor_license NULL values
+      const transform = (rowData, headers) => {
+        const values = [];
+        const idIndex = headers.findIndex(h => h === 'id' || h === 'ID');
+        let placeholders = [];
+        
+        // Skip id column and map values for each field, handling NULL values for autor_license
+        fieldNames.forEach(field => {
+          const idx = headers.findIndex(h => h.toLowerCase() === field.toLowerCase());
+          if (idx >= 0) {
+            if (field === 'autor_license' && (!rowData[idx] || rowData[idx] === '""')) {
+              values.push(null);
+            } else {
+              values.push(rowData[idx]);
+            }
+            placeholders.push('?');
+          }
+        });
+        
+        return { values, placeholders: placeholders.join(',') };
+      };
+      
+      // Use batch insert
       try {
-        // Use LOAD DATA INFILE for each CSV
-        await connection.query(`
-          LOAD DATA INFILE ?
-          INTO TABLE Libro
-          FIELDS TERMINATED BY ',' ENCLOSED BY '"'
-          LINES TERMINATED BY '\n'
-          IGNORE 1 ROWS
-          (id, ISBN, title, @autor_license, editorial, pages, year, genre, language, format, sinopsis, content)
-          SET autor_license = NULLIF(@autor_license, '')
-        `, [csvFile]);
+        const inserted = await mysqlOps.batchInsertFromCSV(csvFile, 'Libro', fieldNames, transform);
+        totalInserted += inserted;
         
         // Log progress
         if ((i + 1) % 10 === 0 || i === csvFiles.length - 1) {
-          console.log(`Processed ${i + 1} of ${csvFiles.length} CSV files`);
+          console.log(`Processed ${i + 1} of ${csvFiles.length} CSV files, total rows inserted: ${totalInserted}`);
         }
-      } finally {
-        await connection.end();
+      } catch (err) {
+        console.error(`Error processing file ${csvFile}:`, err);
       }
     }
     
@@ -318,38 +387,57 @@ async function generateAndInsertAuthors() {
   timer.start('generate_insert_authors');
   
   try {
-    // Generate 150,000 authors
+    // Generate authors
     timer.start('generate_authors');
-    const authors = generateAuthors(150000, 51); // Start ID after initial authors
-    const authorsCSV = authorsToCSV(authors);
-    fs.writeFileSync(largeAuthorCSV, authorsCSV);
-    timer.end('generate_authors');
     
-    // Insert authors using LOAD DATA INFILE
-    timer.start('insert_authors');
-    const connection = await getConnection();
+    // Generate in chunks to prevent memory issues
+    const chunkSize = 10000;
+    const chunks = Math.ceil(AUTHORS_COUNT / chunkSize);
     
-    try {
-      await connection.query(`
-        LOAD DATA INFILE ?
-        INTO TABLE Autor
-        FIELDS TERMINATED BY ',' ENCLOSED BY '"'
-        LINES TERMINATED BY '\n'
-        IGNORE 1 ROWS
-        (id, license, name, lastName, @secondLastName, @year)
-        SET 
-          secondLastName = NULLIF(@secondLastName, ''),
-          year = NULLIF(@year, '')
-      `, [largeAuthorCSV]);
+    // Create the CSV header first
+    fs.writeFileSync(largeAuthorCSV, 'id,license,name,lastName,secondLastName,year\n');
+    
+    for (let i = 0; i < chunks; i++) {
+      const currentCount = Math.min(chunkSize, AUTHORS_COUNT - (i * chunkSize));
+      console.log(`Generating chunk ${i+1}/${chunks} (${currentCount} authors)`);
       
-      const [countResult] = await connection.query(`SELECT COUNT(*) as count FROM Autor`);
-      console.log(`Total authors in database: ${countResult[0].count}`);
-      
-    } finally {
-      await connection.end();
-      timer.end('insert_authors');
+      const startId = 51 + (i * chunkSize); // Start ID after initial authors
+      const authors = generateAuthors(currentCount, startId);
+      const authorsCSV = authorsToCSV(authors).split('\n').slice(1).join('\n');
+      fs.appendFileSync(largeAuthorCSV, authorsCSV + '\n');
     }
     
+    timer.end('generate_authors');
+    
+    // Insert authors using direct SQL instead of LOAD DATA INFILE
+    timer.start('insert_authors');
+    
+    // Use our new batch insert function
+    const mysqlOps = require('./utils/mysql-operations');
+    const fieldNames = ['id', 'license', 'name', 'lastName', 'secondLastName', 'year'];
+    
+    // Transform function to handle NULL values
+    const transform = (rowData, headers) => {
+      const values = [];
+      const placeholders = [];
+      
+      fieldNames.forEach((field, idx) => {
+        const value = rowData[idx];
+        if ((field === 'secondLastName' || field === 'year') && (!value || value === '""')) {
+          values.push(null);
+        } else {
+          values.push(value);
+        }
+        placeholders.push('?');
+      });
+      
+      return { values, placeholders: placeholders.join(',') };
+    };
+    
+    const inserted = await mysqlOps.batchInsertFromCSV(largeAuthorCSV, 'Autor', fieldNames, transform);
+    console.log(`Total authors inserted: ${inserted}`);
+    
+    timer.end('insert_authors');
   } catch (error) {
     console.error("Error generating and inserting authors:", error);
   } finally {
@@ -396,6 +484,10 @@ async function exportTablesToCSV() {
 
 async function migrateAndRestore() {
   timer.start('migrate_restore');
+  
+  // Define the export files with absolute paths
+  const authorsJsonPath = path.join(process.cwd(), 'mongodb_authors.json');
+  const booksJsonPath = path.join(process.cwd(), 'mongodb_books.json');
   
   try {
     // Step 1: Export from MySQL to MongoDB
@@ -446,26 +538,51 @@ async function migrateAndRestore() {
     // Step 3: Export from MongoDB (to temporary files)
     timer.start('export_from_mongodb');
     
+    // Make sure we use absolute paths for the output files
     const mongoExportBooks = new Process("mongoexport");
-    mongoExportBooks.ProcessArguments.push(`--uri=${config.mongo.uri}/${config.mongo.database}`);
+    mongoExportBooks.ProcessArguments.push(`--uri=${config.mongo.uri}`);
     mongoExportBooks.ProcessArguments.push("--collection=Libros");
-    mongoExportBooks.ProcessArguments.push("--out=mongodb_books.json");
+    mongoExportBooks.ProcessArguments.push(`--out=${booksJsonPath}`);
+    mongoExportBooks.ProcessArguments.push("--jsonArray"); // Add this to get a proper JSON array
+    
+    // Log the full command so we can see what's happening
+    console.log(`Executing MongoDB export for books: mongoexport ${mongoExportBooks.ProcessArguments.join(' ')}`);
     await mongoExportBooks.ExecuteAsync(true);
     
     const mongoExportAuthors = new Process("mongoexport");
-    mongoExportAuthors.ProcessArguments.push(`--uri=${config.mongo.uri}/${config.mongo.database}`);
+    mongoExportAuthors.ProcessArguments.push(`--uri=${config.mongo.uri}`);
     mongoExportAuthors.ProcessArguments.push("--collection=Autores");
-    mongoExportAuthors.ProcessArguments.push("--out=mongodb_authors.json");
+    mongoExportAuthors.ProcessArguments.push(`--out=${authorsJsonPath}`);
+    mongoExportAuthors.ProcessArguments.push("--jsonArray"); // Add this to get a proper JSON array
+    
+    console.log(`Executing MongoDB export for authors: mongoexport ${mongoExportAuthors.ProcessArguments.join(' ')}`);
     await mongoExportAuthors.ExecuteAsync(true);
+    
+    // Verify files exist
+    if (fs.existsSync(authorsJsonPath) && fs.existsSync(booksJsonPath)) {
+      console.log(`MongoDB export successful. Files created: ${authorsJsonPath}, ${booksJsonPath}`);
+    } else {
+      console.error(`MongoDB export may have failed. Files not found: ${!fs.existsSync(authorsJsonPath) ? authorsJsonPath : ''} ${!fs.existsSync(booksJsonPath) ? booksJsonPath : ''}`);
+    }
     
     timer.end('export_from_mongodb');
     
     // Step 4: Restore to MySQL
     timer.start('restore_to_mysql');
     
+    // Check if the files exist before trying to parse them
+    if (!fs.existsSync(authorsJsonPath)) {
+      throw new Error(`Authors JSON file not found: ${authorsJsonPath}`);
+    }
+    if (!fs.existsSync(booksJsonPath)) {
+      throw new Error(`Books JSON file not found: ${booksJsonPath}`);
+    }
+    
     // Process and restore authors first (for foreign key constraints)
-    const authorsJson = JSON.parse(fs.readFileSync('mongodb_authors.json', 'utf-8'));
-    const booksJson = JSON.parse(fs.readFileSync('mongodb_books.json', 'utf-8'));
+    console.log(`Reading authors from ${authorsJsonPath}`);
+    const authorsJson = JSON.parse(fs.readFileSync(authorsJsonPath, 'utf-8'));
+    console.log(`Reading books from ${booksJsonPath}`);
+    const booksJson = JSON.parse(fs.readFileSync(booksJsonPath, 'utf-8'));
     
     const connRestore = await getConnection();
     
@@ -634,13 +751,13 @@ function generatePerformanceReport(metrics) {
   // Create report data
   const reportData = {
     testResults: [
-      { name: 'Generate 100,000 Books CSV', time: metrics.generate_large_books_csv?.duration || 0 },
+      { name: 'Generate Books CSV', time: metrics.generate_large_books_csv?.duration || 0 },
       { name: 'Insert CSV into MySQL', time: metrics.insert_large_books_csv?.duration || 0 },
-      { name: 'Stress Test (3,500 books)', time: metrics.stress_test_mysql?.duration || 0 },
-      { name: 'Generate 100 CSV Files', time: metrics.generate_multiple_csv?.duration || 0 },
+      { name: 'Stress Test', time: metrics.stress_test_mysql?.duration || 0 },
+      { name: 'Generate CSV Files', time: metrics.generate_multiple_csv?.duration || 0 },
       { name: 'Insert Multiple CSV Files', time: metrics.insert_multiple_csv?.duration || 0 },
       { name: 'Complex Query Execution', time: metrics.complex_query?.duration || 0 },
-      { name: 'Generate & Insert 150,000 Authors', time: metrics.generate_insert_authors?.duration || 0 },
+      { name: 'Generate & Insert Authors', time: metrics.generate_insert_authors?.duration || 0 },
       { name: 'Export Tables to CSV', time: metrics.export_tables_csv?.duration || 0 },
       { name: 'Migrate & Restore MySQL/MongoDB', time: metrics.migrate_restore?.duration || 0 },
       { name: 'MySQL Database Dump', time: metrics.mysql_dump?.duration || 0 },

@@ -3,7 +3,7 @@ const Process = require('./Process');
 const config = require('./config');
 
 async function insertDocuments(data) {
-    const client = new MongoClient(config.mongo.uri);
+    const client = new MongoClient(config.mongo.uri, config.mongo.options);
 
     try {
         await client.connect();
@@ -18,6 +18,7 @@ async function insertDocuments(data) {
         return result.insertedCount;
     } catch (error) {
         console.error("MongoDB insert error:", error);
+        console.error("Connection URI (redacted password):", maskPassword(config.mongo.uri));
         return 0;
     } finally {
         await client.close();
@@ -25,8 +26,27 @@ async function insertDocuments(data) {
 }
 
 async function importCsv(csvFilePath = config.paths.csvFilePath) {
-    const mongoimport = new Process("mongoimport", { shell: true });
+    // Build MongoDB connection string for the CLI tool
+    let mongoImportUri = config.mongo.uri;
+    
+    // Extract credentials if present in URI
+    const mongoUriMatch = mongoImportUri.match(/mongodb:\/\/([^:]+):([^@]+)@(.+)/);
+    let authArgs = [];
+    
+    if (mongoUriMatch) {
+        // Use --username and --password args instead of URI with credentials
+        const username = mongoUriMatch[1];
+        const password = mongoUriMatch[2];
+        // Reconstruct URI without credentials
+        mongoImportUri = `mongodb://${mongoUriMatch[3]}`;
+        authArgs = ["--username", username, "--password", password];
+    }
 
+    const mongoimport = new Process("mongoimport", { shell: true });
+    
+    mongoimport.ProcessArguments.push("--uri");
+    mongoimport.ProcessArguments.push(mongoImportUri);
+    mongoimport.ProcessArguments.push(...authArgs);
     mongoimport.ProcessArguments.push("--db");
     mongoimport.ProcessArguments.push(config.mongo.database);
     mongoimport.ProcessArguments.push("--collection");
@@ -38,6 +58,7 @@ async function importCsv(csvFilePath = config.paths.csvFilePath) {
     mongoimport.ProcessArguments.push("--fields");
     mongoimport.ProcessArguments.push("x,y,z");
 
+    console.log(`Running: mongoimport ${mongoimport.ProcessArguments.join(' ')}`);
     mongoimport.Execute();
 
     try {
@@ -48,6 +69,12 @@ async function importCsv(csvFilePath = config.paths.csvFilePath) {
         console.error("MongoDB CSV import error:", error);
         return false;
     }
+}
+
+// Helper function to mask password in connection string for logs
+function maskPassword(uri) {
+    if (typeof uri !== 'string') return 'invalid-uri';
+    return uri.replace(/\/\/([^:]+):([^@]+)@/, '//\\1:***@');
 }
 
 module.exports = {

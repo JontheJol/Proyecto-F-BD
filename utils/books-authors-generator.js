@@ -26,15 +26,18 @@ function generateISBN() {
  * Generate a random license ID
  */
 function generateLicense() {
-  // Format: ABC-123456-XY
+  // Format: XXX-NNNN-XX (exactly 12 characters)
+  // Three uppercase letters, followed by hyphen
+  // Four digits, followed by hyphen
+  // Two uppercase letters
   const letters1 = String.fromCharCode(65 + randomNumber(0, 25)) + 
                   String.fromCharCode(65 + randomNumber(0, 25)) + 
                   String.fromCharCode(65 + randomNumber(0, 25));
-  const numbers = String(randomNumber(100000, 999999));
+  const numbers = String(randomNumber(1000, 9999)); // Exactly 4 digits
   const letters2 = String.fromCharCode(65 + randomNumber(0, 25)) + 
                   String.fromCharCode(65 + randomNumber(0, 25));
   
-  return `${letters1}-${numbers}-${letters2}`;
+  return `${letters1}-${numbers}-${letters2}`; // Total: 3+1+4+1+2 = 12 chars
 }
 
 /**
