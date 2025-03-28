@@ -10,15 +10,33 @@ const genres = ['Fiction', 'Non-Fiction', 'Science Fiction', 'Fantasy', 'Mystery
 const formats = ['Hardcover', 'Paperback', 'E-book', 'Audio Book', 'Large Print', 'Pocket Edition'];
 const editorials = ['Penguin', 'Random House', 'HarperCollins', 'Simon & Schuster', 'Macmillan', 'Hachette', 'Wiley', 'Scholastic', 'Oxford University Press'];
 
+// Track generated ISBNs to avoid duplicates
+const generatedISBNs = new Set();
+
 /**
- * Generate a random ISBN (10 digits for simplicity)
+ * Generate a unique random ISBN
  */
 function generateISBN() {
-  // Generate a 13-digit ISBN
-  let isbn = '978'; // Standard prefix
-  for (let i = 0; i < 10; i++) {
-    isbn += randomNumber(0, 9);
+  // Try up to 10 times to generate a unique ISBN
+  for (let attempt = 0; attempt < 10; attempt++) {
+    // Generate a 13-digit ISBN
+    let isbn = '978'; // Standard prefix
+    for (let i = 0; i < 10; i++) {
+      isbn += randomNumber(0, 9);
+    }
+    
+    // Check if this ISBN is unique
+    if (!generatedISBNs.has(isbn)) {
+      generatedISBNs.add(isbn);
+      return isbn;
+    }
   }
+  
+  // If we're generating too many ISBNs and collisions are frequent, 
+  // use timestamp as part of the ISBN to ensure uniqueness
+  const timestamp = Date.now().toString().slice(-10);
+  let isbn = '978' + timestamp;
+  generatedISBNs.add(isbn);
   return isbn;
 }
 

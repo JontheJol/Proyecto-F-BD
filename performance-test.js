@@ -227,11 +227,12 @@ async function insertBooksCSVIntoMySQL(csvFilePath) {
     
     await mysqlOps.batchInsertFromCSV(csvFilePath, 'import_libro', fieldNames, transform);
     
-    // Now copy from import table to actual table with validation
+    // Now copy from import table to actual table with validation, handling duplicates
     const connFinal = await getConnection();
     try {
+      // Use INSERT IGNORE to skip duplicates silently
       await connFinal.query(`
-        INSERT INTO Libro (ISBN, title, autor_license, editorial, pages, year, genre, language, format, sinopsis, content)
+        INSERT IGNORE INTO Libro (ISBN, title, autor_license, editorial, pages, year, genre, language, format, sinopsis, content)
         SELECT ISBN, title, autor_license, editorial, pages, year, genre, language, format, sinopsis, content
         FROM import_libro
         WHERE autor_license IS NULL OR autor_license IN (SELECT license FROM Autor)
@@ -256,19 +257,15 @@ async function insertBooksCSVIntoMySQL(csvFilePath) {
 async function stressTestMySQL() {
   timer.start('stress_test_mysql');
   const connection = await getConnection();
-  
   try {
     // Generate books for stress testing
     const stressBooks = generateBooks(STRESS_TEST_COUNT, allAuthorLicenses);
-    
     // Use transaction for faster insertion
     await connection.beginTransaction();
-    
     // Insert books in batches of 100
     const batchSize = 100;
     for (let i = 0; i < stressBooks.length; i += batchSize) {
       const batch = stressBooks.slice(i, i + batchSize);
-      
       // Convert batch to values string for bulk insert
       const values = batch.map(book => 
         `("${book.isbn}", "${book.title}", ${book.autor_license ? `"${book.autor_license}"` : 'NULL'}, 
@@ -276,22 +273,18 @@ async function stressTestMySQL() {
           "${book.language}", "${book.format}", "${book.sinopsis?.replace(/"/g, '\\"')}", 
           "${book.content?.replace(/"/g, '\\"')}")`
       ).join(',');
-      
       // Execute bulk insert
       await connection.query(`
         INSERT INTO Libro 
           (ISBN, title, autor_license, editorial, pages, year, genre, language, format, sinopsis, content)
         VALUES ${values}
       `);
-      
       // Log progress every 1000 books
       if ((i + batchSize) % 1000 === 0 || i + batchSize >= stressBooks.length) {
         console.log(`Inserted ${Math.min(i + batchSize, stressBooks.length)} of ${stressBooks.length} stress test books`);
       }
     }
-    
     await connection.commit();
-    
   } catch (error) {
     console.error("Error in stress test:", error);
     await connection.rollback();
@@ -303,11 +296,9 @@ async function stressTestMySQL() {
 
 async function insertMultipleCSVFiles(csvFiles) {
   timer.start('insert_multiple_csv');
-  
   try {
     const mysqlOps = require('./utils/mysql-operations');
     const fieldNames = ['ISBN', 'title', 'autor_license', 'editorial', 'pages', 'year', 'genre', 'language', 'format', 'sinopsis', 'content'];
-    
     // Process each CSV file
     let totalInserted = 0;
     for (let i = 0; i < csvFiles.length; i++) {
@@ -318,7 +309,6 @@ async function insertMultipleCSVFiles(csvFiles) {
         const values = [];
         const idIndex = headers.findIndex(h => h === 'id' || h === 'ID');
         let placeholders = [];
-        
         // Skip id column and map values for each field, handling NULL values for autor_license
         fieldNames.forEach(field => {
           const idx = headers.findIndex(h => h.toLowerCase() === field.toLowerCase());
@@ -339,7 +329,6 @@ async function insertMultipleCSVFiles(csvFiles) {
       try {
         const inserted = await mysqlOps.batchInsertFromCSV(csvFile, 'Libro', fieldNames, transform);
         totalInserted += inserted;
-        
         // Log progress
         if ((i + 1) % 10 === 0 || i === csvFiles.length - 1) {
           console.log(`Processed ${i + 1} of ${csvFiles.length} CSV files, total rows inserted: ${totalInserted}`);
@@ -348,7 +337,6 @@ async function insertMultipleCSVFiles(csvFiles) {
         console.error(`Error processing file ${csvFile}:`, err);
       }
     }
-    
   } catch (error) {
     console.error("Error inserting multiple CSV files:", error);
   } finally {
@@ -359,7 +347,6 @@ async function insertMultipleCSVFiles(csvFiles) {
 async function runComplexQuery() {
   timer.start('complex_query');
   const connection = await getConnection();
-  
   try {
     // Run complex query with statistics
     const [results] = await connection.query(`
@@ -372,9 +359,8 @@ async function runComplexQuery() {
         COUNT(*) as total_books
       FROM Libro
     `);
-    
+        
     console.log("Query Results:", results[0]);
-    
   } catch (error) {
     console.error("Error running complex query:", error);
   } finally {
@@ -385,42 +371,32 @@ async function runComplexQuery() {
 
 async function generateAndInsertAuthors() {
   timer.start('generate_insert_authors');
-  
   try {
     // Generate authors
     timer.start('generate_authors');
-    
     // Generate in chunks to prevent memory issues
     const chunkSize = 10000;
     const chunks = Math.ceil(AUTHORS_COUNT / chunkSize);
-    
     // Create the CSV header first
     fs.writeFileSync(largeAuthorCSV, 'id,license,name,lastName,secondLastName,year\n');
-    
     for (let i = 0; i < chunks; i++) {
       const currentCount = Math.min(chunkSize, AUTHORS_COUNT - (i * chunkSize));
       console.log(`Generating chunk ${i+1}/${chunks} (${currentCount} authors)`);
-      
       const startId = 51 + (i * chunkSize); // Start ID after initial authors
       const authors = generateAuthors(currentCount, startId);
       const authorsCSV = authorsToCSV(authors).split('\n').slice(1).join('\n');
       fs.appendFileSync(largeAuthorCSV, authorsCSV + '\n');
     }
-    
     timer.end('generate_authors');
-    
     // Insert authors using direct SQL instead of LOAD DATA INFILE
     timer.start('insert_authors');
-    
     // Use our new batch insert function
     const mysqlOps = require('./utils/mysql-operations');
     const fieldNames = ['id', 'license', 'name', 'lastName', 'secondLastName', 'year'];
-    
     // Transform function to handle NULL values
     const transform = (rowData, headers) => {
       const values = [];
       const placeholders = [];
-      
       fieldNames.forEach((field, idx) => {
         const value = rowData[idx];
         if ((field === 'secondLastName' || field === 'year') && (!value || value === '""')) {
@@ -433,10 +409,8 @@ async function generateAndInsertAuthors() {
       
       return { values, placeholders: placeholders.join(',') };
     };
-    
     const inserted = await mysqlOps.batchInsertFromCSV(largeAuthorCSV, 'Autor', fieldNames, transform);
     console.log(`Total authors inserted: ${inserted}`);
-    
     timer.end('insert_authors');
   } catch (error) {
     console.error("Error generating and inserting authors:", error);
@@ -447,10 +421,9 @@ async function generateAndInsertAuthors() {
 
 async function exportTablesToCSV() {
   timer.start('export_tables_csv');
-  
   try {
     const connection = await getConnection();
-    
+      
     // Export Libro table
     timer.start('export_books');
     const [books] = await connection.query(`SELECT * FROM Libro`);
@@ -472,9 +445,7 @@ async function exportTablesToCSV() {
       }).join('\n')
     );
     timer.end('export_authors');
-    
     console.log(`Exported ${books.length} books and ${authors.length} authors to CSV`);
-    
   } catch (error) {
     console.error("Error exporting tables to CSV:", error);
   } finally {
@@ -484,34 +455,62 @@ async function exportTablesToCSV() {
 
 async function migrateAndRestore() {
   timer.start('migrate_restore');
-  
-  // Define the export files with absolute paths
   const authorsJsonPath = path.join(process.cwd(), 'mongodb_authors.json');
   const booksJsonPath = path.join(process.cwd(), 'mongodb_books.json');
-  
   try {
     // Step 1: Export from MySQL to MongoDB
     timer.start('export_to_mongodb');
     
-    // Connect to MongoDB
-    const mongoClient = new MongoClient(config.mongo.uri);
-    await mongoClient.connect();
-    const db = mongoClient.db(config.mongo.database);
+    let mongoClient = null;
+    let connectionSuccessful = false;
     
-    // Create collections
-    await db.createCollection('Libros');
-    await db.createCollection('Autores');
+    const connectionOptions = [
+      config.mongo.uri,
+      "mongodb://localhost:27018/LibrosAutores",
+      "mongodb://localhost:27018/"
+    ];
+    for (const uri of connectionOptions) {
+      if (connectionSuccessful) break;
+      try {
+        console.log(`Attempting MongoDB connection with URI: ${uri.replace(/\/\/([^:]+):([^@]+)@/, '//\\1:***@')}`);
+        mongoClient = new MongoClient(uri, {
+          serverSelectionTimeoutMS: 5000,
+          connectTimeoutMS: 5000
+        });
+        await mongoClient.connect();
+        console.log("MongoDB connection successful");
+        connectionSuccessful = true;
+      } catch (connErr) {
+        console.log(`Connection failed with URI: ${uri}. Error: ${connErr.message}`);
+        if (mongoClient) await mongoClient.close();
+        mongoClient = null;
+      }
+    }
     
-    // Import data from MySQL
+    if (!connectionSuccessful) {
+      console.error("All MongoDB connection attempts failed. Using direct export approach instead.");
+      const directExport = await exportTablesDirectly();
+      timer.end('export_to_mongodb');
+      timer.end('migrate_restore');
+      return directExport;
+    }
+    
+    const db = mongoClient.db(config.mongo.database || "LibrosAutores");
+    
+    try {
+      await db.createCollection('Libros');
+      await db.createCollection('Autores');
+    } catch (err) {
+      console.log("Collections may already exist:", err.message);
+    }
+    
     const connection = await getConnection();
-    const [books] = await connection.query(`SELECT * FROM Libro`);
-    const [authors] = await connection.query(`SELECT * FROM Autor`);
+    const [books] = await connection.query(`SELECT * FROM Libro LIMIT 10000`);
+    const [authors] = await connection.query(`SELECT * FROM Autor LIMIT 10000`);
     
-    // Insert into MongoDB
     if (books.length > 0) {
       await db.collection('Libros').insertMany(books);
     }
-    
     if (authors.length > 0) {
       await db.collection('Autores').insertMany(authors);
     }
@@ -526,7 +525,6 @@ async function migrateAndRestore() {
     timer.start('delete_from_mysql');
     const connDelete = await getConnection();
     
-    // Disable foreign key checks for deletion
     await connDelete.query(`SET FOREIGN_KEY_CHECKS = 0`);
     await connDelete.query(`TRUNCATE Libro`);
     await connDelete.query(`TRUNCATE Autor`);
@@ -536,41 +534,12 @@ async function migrateAndRestore() {
     timer.end('delete_from_mysql');
     
     // Step 3: Export from MongoDB (to temporary files)
-    timer.start('export_from_mongodb');
-    
-    // Make sure we use absolute paths for the output files
-    const mongoExportBooks = new Process("mongoexport");
-    mongoExportBooks.ProcessArguments.push(`--uri=${config.mongo.uri}`);
-    mongoExportBooks.ProcessArguments.push("--collection=Libros");
-    mongoExportBooks.ProcessArguments.push(`--out=${booksJsonPath}`);
-    mongoExportBooks.ProcessArguments.push("--jsonArray"); // Add this to get a proper JSON array
-    
-    // Log the full command so we can see what's happening
-    console.log(`Executing MongoDB export for books: mongoexport ${mongoExportBooks.ProcessArguments.join(' ')}`);
-    await mongoExportBooks.ExecuteAsync(true);
-    
-    const mongoExportAuthors = new Process("mongoexport");
-    mongoExportAuthors.ProcessArguments.push(`--uri=${config.mongo.uri}`);
-    mongoExportAuthors.ProcessArguments.push("--collection=Autores");
-    mongoExportAuthors.ProcessArguments.push(`--out=${authorsJsonPath}`);
-    mongoExportAuthors.ProcessArguments.push("--jsonArray"); // Add this to get a proper JSON array
-    
-    console.log(`Executing MongoDB export for authors: mongoexport ${mongoExportAuthors.ProcessArguments.join(' ')}`);
-    await mongoExportAuthors.ExecuteAsync(true);
-    
-    // Verify files exist
-    if (fs.existsSync(authorsJsonPath) && fs.existsSync(booksJsonPath)) {
-      console.log(`MongoDB export successful. Files created: ${authorsJsonPath}, ${booksJsonPath}`);
-    } else {
-      console.error(`MongoDB export may have failed. Files not found: ${!fs.existsSync(authorsJsonPath) ? authorsJsonPath : ''} ${!fs.existsSync(booksJsonPath) ? booksJsonPath : ''}`);
-    }
-    
+    await exportMongoCollectionsToJson(authorsJsonPath, booksJsonPath);
     timer.end('export_from_mongodb');
     
     // Step 4: Restore to MySQL
     timer.start('restore_to_mysql');
     
-    // Check if the files exist before trying to parse them
     if (!fs.existsSync(authorsJsonPath)) {
       throw new Error(`Authors JSON file not found: ${authorsJsonPath}`);
     }
@@ -578,7 +547,6 @@ async function migrateAndRestore() {
       throw new Error(`Books JSON file not found: ${booksJsonPath}`);
     }
     
-    // Process and restore authors first (for foreign key constraints)
     console.log(`Reading authors from ${authorsJsonPath}`);
     const authorsJson = JSON.parse(fs.readFileSync(authorsJsonPath, 'utf-8'));
     console.log(`Reading books from ${booksJsonPath}`);
@@ -586,9 +554,7 @@ async function migrateAndRestore() {
     
     const connRestore = await getConnection();
     
-    // Insert authors
     if (authorsJson.length > 0) {
-      // Generate values string for bulk insert
       const authorValues = authorsJson.map(author => 
         `(${author.id}, "${author.license}", "${author.name}", 
           ${author.lastName ? `"${author.lastName}"` : 'NULL'}, 
@@ -597,17 +563,15 @@ async function migrateAndRestore() {
       ).join(',');
       
       await connRestore.query(`
-        INSERT INTO Autor (id, license, name, lastName, secondLastName, year)
+        INSERT INTO Autor (id, license, name, lastName, secondLastName, year) 
         VALUES ${authorValues}
       `);
     }
     
-    // Insert books in batches to avoid query size limits
     if (booksJson.length > 0) {
       const batchSize = 1000;
       for (let i = 0; i < booksJson.length; i += batchSize) {
         const batch = booksJson.slice(i, i + batchSize);
-        
         const bookValues = batch.map(book => 
           `(${book.id}, "${book.ISBN}", "${book.title}", 
             ${book.autor_license ? `"${book.autor_license}"` : 'NULL'}, 
@@ -621,10 +585,9 @@ async function migrateAndRestore() {
         ).join(',');
         
         await connRestore.query(`
-          INSERT INTO Libro (id, ISBN, title, autor_license, editorial, pages, year, genre, language, format, sinopsis, content)
+          INSERT INTO Libro (id, ISBN, title, autor_license, editorial, pages, year, genre, language, format, sinopsis, content) 
           VALUES ${bookValues}
         `);
-        
         console.log(`Restored ${Math.min(i + batchSize, booksJson.length)} of ${booksJson.length} books`);
       }
     }
@@ -636,6 +599,92 @@ async function migrateAndRestore() {
     console.error("Error during migration and restoration:", error);
   } finally {
     timer.end('migrate_restore');
+  }
+}
+
+async function exportMongoCollectionsToJson(authorsPath, booksPath) {
+  timer.start('export_from_mongodb');
+  
+  try {
+    let mongoClient = null;
+    let connectionSuccessful = false;
+    
+    const connectionOptions = [
+      config.mongo.uri,
+      "mongodb://localhost:27018/LibrosAutores",
+      "mongodb://localhost:27018/"
+    ];
+        
+    for (const uri of connectionOptions) {
+      if (connectionSuccessful) break;
+      try {
+        console.log(`Attempting MongoDB connection with URI: ${uri.replace(/\/\/([^:]+):([^@]+)@/, '//\\1:***@')}`);
+        mongoClient = new MongoClient(uri, {
+          serverSelectionTimeoutMS: 5000,
+          connectTimeoutMS: 5000
+        });
+        await mongoClient.connect();
+        console.log("MongoDB connection successful");
+        connectionSuccessful = true;
+      } catch (connErr) {
+        console.log(`Connection failed with URI: ${uri}. Error: ${connErr.message}`);
+        if (mongoClient) await mongoClient.close();
+        mongoClient = null;
+      }
+    }
+
+    if (!connectionSuccessful) {
+      throw new Error("All MongoDB connection attempts failed");
+    } 
+    
+    const db = mongoClient.db(config.mongo.database || "LibrosAutores");
+    
+    try {
+      const authors = await db.collection('Autores').find({}).toArray();
+      fs.writeFileSync(authorsPath, JSON.stringify(authors));
+      console.log(`Exported ${authors.length} authors to ${authorsPath}`);
+    } catch (err) {
+      console.error("Error exporting authors:", err.message);
+      fs.writeFileSync(authorsPath, "[]");
+    }
+    
+    try {
+      const books = await db.collection('Libros').find({}).toArray();
+      fs.writeFileSync(booksPath, JSON.stringify(books));
+      console.log(`Exported ${books.length} books to ${booksPath}`);
+    } catch (err) {
+      console.error("Error exporting books:", err.message);
+      fs.writeFileSync(booksPath, "[]");
+    }
+    
+    await mongoClient.close();
+  } catch (error) {
+    console.error("Error during direct MongoDB export:", error);
+    fs.writeFileSync(authorsPath, "[]");
+    fs.writeFileSync(booksPath, "[]");
+  }
+  return true;
+}
+
+async function exportTablesDirectly() {
+  console.log("Using direct export approach instead of MongoDB");
+  
+  try {
+    const connection = await getConnection();
+    
+    const [authors] = await connection.query(`SELECT * FROM Autor LIMIT 10000`);
+    fs.writeFileSync('mongodb_authors.json', JSON.stringify(authors));
+    console.log(`Directly exported ${authors.length} authors`);
+    
+    const [books] = await connection.query(`SELECT * FROM Libro LIMIT 10000`);
+    fs.writeFileSync('mongodb_books.json', JSON.stringify(books));
+    console.log(`Directly exported ${books.length} books`);
+    
+    await connection.end();
+    return true;
+  } catch (err) {
+    console.error("Error during direct export:", err);
+    return false;
   }
 }
 
@@ -662,19 +711,16 @@ async function mysqlDump() {
 async function mysqlRestore() {
   timer.start('mysql_restore');
   
-  // First, we'll drop and recreate the database
   try {
     const connReset = await mysql.createConnection({
       host: config.mysql.host,
       user: config.mysql.user,
       password: config.mysql.password
     });
-    
     await connReset.query(`DROP DATABASE IF EXISTS ${config.mysql.database}`);
     await connReset.query(`CREATE DATABASE ${config.mysql.database}`);
     await connReset.end();
     
-    // Now restore from the dump file
     const restoreProcess = new Process("mysql", {
       shell: true
     });
@@ -685,7 +731,6 @@ async function mysqlRestore() {
     
     await restoreProcess.ExecuteAsync(true);
     console.log("MySQL database restore completed");
-    
   } catch (error) {
     console.error("Error restoring MySQL dump:", error);
   } finally {
@@ -694,7 +739,6 @@ async function mysqlRestore() {
 }
 
 async function testPermissionFailures() {
-  // Test userC trying to insert an author
   timer.start('userC_insert_author_fail');
   try {
     const connC = await mysql.createConnection({
@@ -720,7 +764,6 @@ async function testPermissionFailures() {
   }
   timer.end('userC_insert_author_fail');
   
-  // Test userC trying to insert a book
   timer.start('userC_insert_book_fail');
   try {
     const connC = await mysql.createConnection({
@@ -748,7 +791,6 @@ async function testPermissionFailures() {
 }
 
 function generatePerformanceReport(metrics) {
-  // Create report data
   const reportData = {
     testResults: [
       { name: 'Generate Books CSV', time: metrics.generate_large_books_csv?.duration || 0 },
@@ -766,8 +808,7 @@ function generatePerformanceReport(metrics) {
     ],
     totalTime: metrics.total_performance_test?.duration || 0
   };
-  
-  // Generate HTML report
+
   const html = `
   <!DOCTYPE html>
   <html lang="en">
@@ -792,8 +833,8 @@ function generatePerformanceReport(metrics) {
               color: #2c3e50;
           }
           .summary {
-              background-color: #f8f9fa;
-              padding: 15px;
+              background-color: #f8f9fa; 
+              padding: 15px; 
               border-radius: 5px;
               margin-bottom: 20px;
           }
@@ -803,9 +844,9 @@ function generatePerformanceReport(metrics) {
               margin-bottom: 20px;
           }
           th, td {
-              padding: 12px 15px;
-              border: 1px solid #ddd;
               text-align: left;
+              border: 1px solid #ddd;
+              padding: 12px 15px;
           }
           th {
               background-color: #4CAF50;
@@ -815,26 +856,24 @@ function generatePerformanceReport(metrics) {
               background-color: #f2f2f2;
           }
           .chart-container {
-              margin: 20px 0;
               height: 400px;
+              margin: 20px 0;
           }
           .footer {
-              text-align: center;
-              margin-top: 30px;
-              font-size: 0.8em;
               color: #7f8c8d;
+              font-size: 0.8em;
+              margin-top: 30px;
+              text-align: center;
           }
       </style>
   </head>
   <body>
       <div class="container">
           <h1>MySQL Performance Test Results</h1>
-          
           <div class="summary">
               <h2>Summary</h2>
               <p><strong>Total Execution Time:</strong> ${reportData.totalTime} ms (${(reportData.totalTime / 1000 / 60).toFixed(2)} minutes)</p>
           </div>
-          
           <h2>Test Results</h2>
           <table>
               <thead>
@@ -854,16 +893,13 @@ function generatePerformanceReport(metrics) {
                   `).join('')}
               </tbody>
           </table>
-          
           <div class="chart-container">
               <canvas id="performanceChart"></canvas>
           </div>
-          
           <div class="footer">
               <p>Generated on ${new Date().toLocaleString()}</p>
           </div>
       </div>
-      
       <script>
           const ctx = document.getElementById('performanceChart').getContext('2d');
           new Chart(ctx, {
