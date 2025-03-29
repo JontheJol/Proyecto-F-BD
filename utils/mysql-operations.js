@@ -226,5 +226,6 @@ module.exports = {
     insertData,
     fetchData,
     exportToCsv,
-    batchInsertFromCSV
+    batchInsertFromCSV,
+    parseCSVRow  // Added this export to fix the error
 };

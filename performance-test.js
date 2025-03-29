@@ -35,6 +35,30 @@ const AUTHORS_COUNT = useReducedData ? 15000 : 150000;
 const STRESS_TEST_COUNT = useReducedData ? 1000 : 3500;
 const BATCH_FILES_COUNT = useReducedData ? 10 : 100;
 
+// Check for non-interactive mode flag
+const nonInteractive = process.argv.includes('--non-interactive');
+
+// Helper function to prompt for Enter key
+function waitForEnterKey(message) {
+  return new Promise((resolve) => {
+    if (nonInteractive) {
+      resolve();
+      return;
+    }
+    
+    const readline = require('readline');
+    const rl = readline.createInterface({
+      input: process.stdin,
+      output: process.stdout
+    });
+    
+    rl.question(message || '\nPress Enter to continue to the next test... ', () => {
+      rl.close();
+      resolve();
+    });
+  });
+}
+
 async function getConnection(user = config.mysql.user, password = config.mysql.password) {
   return await mysql.createConnection({
     host: config.mysql.host,
@@ -76,13 +100,18 @@ async function runTests() {
     
     timer.end('generate_large_books_csv');
     
+    // Wait for user to press Enter before continuing
+    await waitForEnterKey();
+    
     // Test 2: Insert the CSV into MySQL
     console.log(`\n📊 TEST 2: Insert books CSV into MySQL`);
     await insertBooksCSVIntoMySQL(largeBookCSV);
+    await waitForEnterKey();
     
     // Test 3: Insert books to stress test MySQL
     console.log(`\n📊 TEST 3: Stress test with ${STRESS_TEST_COUNT} books`);
     await stressTestMySQL();
+    await waitForEnterKey();
     
     // Test 4: Generate CSV files with 1000 books each
     console.log(`\n📊 TEST 4: Generate ${BATCH_FILES_COUNT} CSV files (1000 books each)`);
@@ -92,34 +121,42 @@ async function runTests() {
       booksToCSV, 
       'books_batch');
     timer.end('generate_multiple_csv');
+    await waitForEnterKey();
     
     // Test 5: Insert all CSV files
     console.log("\n📊 TEST 5: Insert CSV files into MySQL");
     await insertMultipleCSVFiles(csvFiles);
+    await waitForEnterKey();
     
     // Test 6: Complex query for statistics
     console.log("\n📊 TEST 6: Run complex statistics query");
     await runComplexQuery();
+    await waitForEnterKey();
     
     // Test 7: Generate and insert authors
     console.log(`\n📊 TEST 7: Generate and insert ${AUTHORS_COUNT} authors`);
     await generateAndInsertAuthors();
+    await waitForEnterKey();
     
     // Test 8: Export tables to CSV
     console.log("\n📊 TEST 8: Export tables to CSV");
     await exportTablesToCSV();
+    await waitForEnterKey();
     
     // Test 9: Backup to MongoDB, delete from MySQL, export from MongoDB, restore to MySQL
     console.log("\n📊 TEST 9: MySQL to MongoDB migration and restoration");
     await migrateAndRestore();
+    await waitForEnterKey();
     
     // Test 10: MySQL dump
     console.log("\n📊 TEST 10: MySQL database dump");
     await mysqlDump();
+    await waitForEnterKey();
     
     // Test 11: MySQL restore from dump
     console.log("\n📊 TEST 11: MySQL database restore");
     await mysqlRestore();
+    await waitForEnterKey();
     
     // Test 12: Failed inserts with unauthorized users
     console.log("\n📊 TEST 12: Permission failure tests");
@@ -379,38 +416,119 @@ async function generateAndInsertAuthors() {
     const chunks = Math.ceil(AUTHORS_COUNT / chunkSize);
     // Create the CSV header first
     fs.writeFileSync(largeAuthorCSV, 'id,license,name,lastName,secondLastName,year\n');
+    
+    // Use smaller batches to reduce memory pressure
     for (let i = 0; i < chunks; i++) {
       const currentCount = Math.min(chunkSize, AUTHORS_COUNT - (i * chunkSize));
       console.log(`Generating chunk ${i+1}/${chunks} (${currentCount} authors)`);
       const startId = 51 + (i * chunkSize); // Start ID after initial authors
-      const authors = generateAuthors(currentCount, startId);
-      const authorsCSV = authorsToCSV(authors).split('\n').slice(1).join('\n');
-      fs.appendFileSync(largeAuthorCSV, authorsCSV + '\n');
+      
+      // Generate authors in smaller sub-chunks if needed
+      const subChunkSize = 2000;
+      const subChunks = Math.ceil(currentCount / subChunkSize);
+      
+      for (let j = 0; j < subChunks; j++) {
+        const subCount = Math.min(subChunkSize, currentCount - (j * subChunkSize));
+        const subStartId = startId + (j * subChunkSize);
+        
+        const authors = generateAuthors(subCount, subStartId);
+        const authorsCSV = authorsToCSV(authors).split('\n').slice(1).join('\n');
+        fs.appendFileSync(largeAuthorCSV, authorsCSV + '\n');
+      }
     }
     timer.end('generate_authors');
-    // Insert authors using direct SQL instead of LOAD DATA INFILE
+    
+    // Insert authors using batch inserts
     timer.start('insert_authors');
-    // Use our new batch insert function
     const mysqlOps = require('./utils/mysql-operations');
     const fieldNames = ['id', 'license', 'name', 'lastName', 'secondLastName', 'year'];
-    // Transform function to handle NULL values
+    
+    // Transform function with better error handling
     const transform = (rowData, headers) => {
-      const values = [];
-      const placeholders = [];
-      fieldNames.forEach((field, idx) => {
-        const value = rowData[idx];
-        if ((field === 'secondLastName' || field === 'year') && (!value || value === '""')) {
-          values.push(null);
-        } else {
-          values.push(value);
-        }
-        placeholders.push('?');
-      });
-      
-      return { values, placeholders: placeholders.join(',') };
+      try {
+        const values = [];
+        const placeholders = [];
+        fieldNames.forEach((field, idx) => {
+          const value = rowData[idx];
+          if ((field === 'secondLastName' || field === 'year') && (!value || value === '""' || value === '')) {
+            values.push(null);
+          } else {
+            values.push(value);
+          }
+          placeholders.push('?');
+        });
+        
+        return { values, placeholders: placeholders.join(',') };
+      } catch (err) {
+        console.error(`Error transforming row: ${rowData}`, err);
+        return null;
+      }
     };
-    const inserted = await mysqlOps.batchInsertFromCSV(largeAuthorCSV, 'Autor', fieldNames, transform);
-    console.log(`Total authors inserted: ${inserted}`);
+    
+    // Use a modified approach to handle large files
+    const batchSize = 1000; // Smaller batch size for better reliability
+    
+    // Read the file in chunks instead of all at once
+    console.log("Reading CSV file in chunks...");
+    const fileLines = fs.readFileSync(largeAuthorCSV, 'utf8')
+                        .split('\n')
+                        .filter(line => line.trim());
+    
+    const headers = fileLines[0].split(',');
+    const dataLines = fileLines.slice(1);
+    
+    console.log(`Found ${dataLines.length} author records to insert`);
+    let insertedTotal = 0;
+    
+    // Connect once and manage transaction manually
+    const connection = await getConnection();
+    
+    try {
+      await connection.beginTransaction();
+      
+      for (let i = 0; i < dataLines.length; i += batchSize) {
+        const batch = dataLines.slice(i, i + batchSize);
+        const values = [];
+        const placeholders = [];
+        
+        batch.forEach(line => {
+          try {
+            const rowData = mysqlOps.parseCSVRow(line);
+            const transformed = transform(rowData, headers);
+            if (transformed) {
+              values.push(...transformed.values);
+              placeholders.push(`(${transformed.placeholders})`);
+            }
+          } catch (err) {
+            console.error(`Error parsing line: ${line}`, err);
+          }
+        });
+        
+        if (placeholders.length > 0) {
+          try {
+            const query = `INSERT IGNORE INTO Autor (${fieldNames.join(',')}) VALUES ${placeholders.join(',')}`;
+            await connection.query(query, values);
+            insertedTotal += placeholders.length;
+          } catch (err) {
+            console.error(`Batch insert error at position ${i}:`, err.message);
+          }
+        }
+        
+        // Log progress
+        if ((i + batchSize) >= dataLines.length || i % (batchSize * 10) === 0) {
+          console.log(`Inserted ${insertedTotal} of ${dataLines.length} authors...`);
+        }
+      }
+      
+      await connection.commit();
+    } catch (error) {
+      await connection.rollback();
+      throw error;
+    } finally {
+      await connection.end();
+    }
+    
+    console.log(`Total authors inserted: ${insertedTotal}`);
     timer.end('insert_authors');
   } catch (error) {
     console.error("Error generating and inserting authors:", error);
@@ -421,34 +539,104 @@ async function generateAndInsertAuthors() {
 
 async function exportTablesToCSV() {
   timer.start('export_tables_csv');
+  let connection;
+  
   try {
-    const connection = await getConnection();
-      
+    connection = await getConnection();
+    
     // Export Libro table
     timer.start('export_books');
-    const [books] = await connection.query(`SELECT * FROM Libro`);
+    console.log("Exporting books to CSV...");
+    
+    // Count total books first
+    const [countResult] = await connection.query(`SELECT COUNT(*) as count FROM Libro`);
+    const totalBooks = countResult[0].count;
+    
+    // Write header first
     fs.writeFileSync(exportedBooksCSV, 
-      'id,ISBN,title,autor_license,editorial,pages,year,genre,language,format,sinopsis,content\n' +
-      books.map(book => {
-        return `${book.id},"${book.ISBN}","${book.title}","${book.autor_license || ''}","${book.editorial || ''}",${book.pages || ''},${book.year || ''},"${book.genre || ''}","${book.language || ''}","${book.format || ''}","${book.sinopsis?.replace(/"/g, '""') || ''}","${book.content?.replace(/"/g, '""') || ''}"`;
-      }).join('\n')
+      'id,ISBN,title,autor_license,editorial,pages,year,genre,language,format,sinopsis,content\n'
     );
+    
+    // Export in batches
+    const batchSize = 5000;
+    let exportedCount = 0;
+    
+    while (exportedCount < totalBooks) {
+      // Get a batch of books
+      const [books] = await connection.query(`
+        SELECT * FROM Libro 
+        ORDER BY id 
+        LIMIT ? OFFSET ?
+      `, [batchSize, exportedCount]);
+      
+      if (books.length === 0) break;
+      
+      // Process batch
+      const batchContent = books.map(book => {
+        try {
+          return `${book.id},"${(book.ISBN || '').replace(/"/g, '""')}","${(book.title || '').replace(/"/g, '""')}","${(book.autor_license || '').replace(/"/g, '""')}","${(book.editorial || '').replace(/"/g, '""')}",${book.pages || ''},${book.year || ''},"${(book.genre || '').replace(/"/g, '""')}","${(book.language || '').replace(/"/g, '""')}","${(book.format || '').replace(/"/g, '""')}","${(book.sinopsis || '').replace(/"/g, '""')}","${(book.content || '').replace(/"/g, '""')}"`;
+        } catch (err) {
+          console.error(`Error processing book ID ${book.id}:`, err);
+          return null;
+        }
+      }).filter(Boolean).join('\n');
+      
+      // Append to file
+      fs.appendFileSync(exportedBooksCSV, batchContent + '\n');
+      exportedCount += books.length;
+      console.log(`Exported ${exportedCount} of ${totalBooks} books`);
+    }
     timer.end('export_books');
     
     // Export Autor table
     timer.start('export_authors');
-    const [authors] = await connection.query(`SELECT * FROM Autor`);
+    console.log("Exporting authors to CSV...");
+    
+    // Count total authors
+    const [authorCount] = await connection.query(`SELECT COUNT(*) as count FROM Autor`);
+    const totalAuthors = authorCount[0].count;
+    
+    // Write header first
     fs.writeFileSync(exportedAuthorsCSV,
-      'id,license,name,lastName,secondLastName,year\n' +
-      authors.map(author => {
-        return `${author.id},"${author.license}","${author.name}","${author.lastName || ''}","${author.secondLastName || ''}",${author.year || ''}`;
-      }).join('\n')
+      'id,license,name,lastName,secondLastName,year\n'
     );
+    
+    // Export authors in batches
+    let exportedAuthors = 0;
+    
+    while (exportedAuthors < totalAuthors) {
+      // Get a batch of authors
+      const [authors] = await connection.query(`
+        SELECT * FROM Autor 
+        ORDER BY id 
+        LIMIT ? OFFSET ?
+      `, [batchSize, exportedAuthors]);
+      
+      if (authors.length === 0) break;
+      
+      // Process batch
+      const batchContent = authors.map(author => {
+        try {
+          return `${author.id},"${(author.license || '').replace(/"/g, '""')}","${(author.name || '').replace(/"/g, '""')}","${(author.lastName || '').replace(/"/g, '""')}","${(author.secondLastName || '').replace(/"/g, '""')}",${author.year || ''}`;
+        } catch (err) {
+          console.error(`Error processing author ID ${author.id}:`, err);
+          return null;
+        }
+      }).filter(Boolean).join('\n');
+      
+      // Append to file
+      fs.appendFileSync(exportedAuthorsCSV, batchContent + '\n');
+      exportedAuthors += authors.length;
+      console.log(`Exported ${exportedAuthors} of ${totalAuthors} authors`);
+    }
     timer.end('export_authors');
-    console.log(`Exported ${books.length} books and ${authors.length} authors to CSV`);
+    
+    console.log(`Exported ${totalBooks} books and ${totalAuthors} authors to CSV`);
   } catch (error) {
     console.error("Error exporting tables to CSV:", error);
+    console.error(error.stack); // Include stack trace for better debugging
   } finally {
+    if (connection) await connection.end();
     timer.end('export_tables_csv');
   }
 }

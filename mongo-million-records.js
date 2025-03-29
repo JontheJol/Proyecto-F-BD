@@ -19,6 +19,30 @@ const csvOutputPath = path.join(config.paths.tmpDir, 'old_books.csv');
 const useReducedData = process.argv.includes('--reduced-data');
 const RECORD_COUNT = useReducedData ? 100000 : 1000000;
 
+// Check for non-interactive mode flag
+const nonInteractive = process.argv.includes('--non-interactive');
+
+// Helper function to prompt for Enter key
+function waitForEnterKey(message) {
+  return new Promise((resolve) => {
+    if (nonInteractive) {
+      resolve();
+      return;
+    }
+    
+    const readline = require('readline');
+    const rl = readline.createInterface({
+      input: process.stdin,
+      output: process.stdout
+    });
+    
+    rl.question(message || '\nPress Enter to continue to the next step... ', () => {
+      rl.close();
+      resolve();
+    });
+  });
+}
+
 async function run() {
   timer.start('total');
 
@@ -26,10 +50,12 @@ async function run() {
     // Step 1: Generate and insert records in MongoDB
     console.log(`🔵 Step 1: Generating ${RECORD_COUNT} book records in MongoDB...`);
     await generateMillionRecords();
+    await waitForEnterKey();
     
     // Step 2: Export only ISBN, year, pages fields to CSV
     console.log("\n🔵 Step 2: Exporting ISBN, year, pages fields to CSV...");
     await exportFieldsToCSV();
+    await waitForEnterKey();
     
     // Step 3: Create old_books table in MySQL and import the data
     console.log("\n🔵 Step 3: Creating old_books table in MySQL and importing data...");

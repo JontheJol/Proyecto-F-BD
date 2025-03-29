@@ -13,6 +13,9 @@ const editorials = ['Penguin', 'Random House', 'HarperCollins', 'Simon & Schuste
 // Track generated ISBNs to avoid duplicates
 const generatedISBNs = new Set();
 
+// Track generated licenses to avoid duplicates
+const generatedLicenses = new Set();
+
 /**
  * Generate a unique random ISBN
  */
@@ -48,14 +51,36 @@ function generateLicense() {
   // Three uppercase letters, followed by hyphen
   // Four digits, followed by hyphen
   // Two uppercase letters
-  const letters1 = String.fromCharCode(65 + randomNumber(0, 25)) + 
-                  String.fromCharCode(65 + randomNumber(0, 25)) + 
-                  String.fromCharCode(65 + randomNumber(0, 25));
-  const numbers = String(randomNumber(1000, 9999)); // Exactly 4 digits
-  const letters2 = String.fromCharCode(65 + randomNumber(0, 25)) + 
-                  String.fromCharCode(65 + randomNumber(0, 25));
   
-  return `${letters1}-${numbers}-${letters2}`; // Total: 3+1+4+1+2 = 12 chars
+  // Try up to 10 times to generate a unique license
+  for (let attempt = 0; attempt < 10; attempt++) {
+    const letters1 = String.fromCharCode(65 + randomNumber(0, 25)) + 
+                    String.fromCharCode(65 + randomNumber(0, 25)) + 
+                    String.fromCharCode(65 + randomNumber(0, 25));
+    const numbers = String(randomNumber(1000, 9999)); // Exactly 4 digits
+    const letters2 = String.fromCharCode(65 + randomNumber(0, 25)) + 
+                    String.fromCharCode(65 + randomNumber(0, 25));
+    
+    const license = `${letters1}-${numbers}-${letters2}`;
+    
+    // Check if this license is unique
+    if (!generatedLicenses.has(license)) {
+      generatedLicenses.add(license);
+      return license;
+    }
+  }
+  
+  // If we had too many collisions, generate a timestamp-based license
+  const randomChars = String.fromCharCode(65 + randomNumber(0, 25)) + 
+                     String.fromCharCode(65 + randomNumber(0, 25)) + 
+                     String.fromCharCode(65 + randomNumber(0, 25));
+  const timestamp = Date.now().toString().slice(-4);
+  const suffix = String.fromCharCode(65 + randomNumber(0, 25)) + 
+                String.fromCharCode(65 + randomNumber(0, 25));
+  
+  const license = `${randomChars}-${timestamp}-${suffix}`;
+  generatedLicenses.add(license);
+  return license;
 }
 
 /**

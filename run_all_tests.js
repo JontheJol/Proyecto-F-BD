@@ -1,12 +1,14 @@
 require('dotenv').config();
 const { spawnSync } = require('child_process');
 const fs = require('fs');
+const readline = require('readline');
 
 console.log('🚀 Starting Database Project Tests');
 
 // Check if the user wants to skip permission tests
 const skipUserSetup = process.argv.includes('--skip-user-setup');
 const skipMemoryIntensive = process.argv.includes('--skip-memory-intensive');
+const nonInteractive = process.argv.includes('--non-interactive');
 
 // Increase memory limit for Node.js for memory-intensive operations
 const nodeOptions = ['--max-old-space-size=8192'];
@@ -39,6 +41,26 @@ const steps = [
   }
 ];
 
+// Helper function to prompt for Enter key
+function waitForEnterKey(message) {
+  return new Promise((resolve) => {
+    if (nonInteractive) {
+      resolve();
+      return;
+    }
+    
+    const rl = readline.createInterface({
+      input: process.stdin,
+      output: process.stdout
+    });
+    
+    rl.question(message || 'Press Enter to continue to the next test...', () => {
+      rl.close();
+      resolve();
+    });
+  });
+}
+
 async function runTests() {
   const startTime = Date.now();
 
@@ -49,10 +71,17 @@ async function runTests() {
   console.log(`Skip Memory-Intensive Operations: ${skipMemoryIntensive}`);
   console.log('--------------------------------------------------\n');
   
-  for (const step of steps) {
+  for (let i = 0; i < steps.length; i++) {
+    const step = steps[i];
+    
     if (step.skip) {
       console.log(`\n\n${step.name} - SKIPPED`);
       continue;
+    }
+
+    // If it's not the first step, wait for user input
+    if (i > 0) {
+      await waitForEnterKey();
     }
 
     console.log(`\n\n${step.name}`);
@@ -70,6 +99,7 @@ async function runTests() {
         process.exit(result.status || 1);
       } else {
         console.log('Continuing despite error as this step is not required...');
+        await waitForEnterKey('Press Enter to continue to the next test despite the error...');
       }
     }
   }
@@ -191,6 +221,7 @@ Usage:
 Options:
   --skip-user-setup         Skip creating MySQL users (good if your user lacks privileges)
   --skip-memory-intensive   Run with reduced data sizes to avoid memory issues
+  --non-interactive         Run all tests without waiting for user input between steps
 `);
 
-runTests();
+runTests().catch(console.error);
