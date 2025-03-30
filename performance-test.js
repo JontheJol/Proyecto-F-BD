@@ -54,9 +54,6 @@ async function runTests() {
     console.log(`Using ${useReducedData ? "REDUCED" : "FULL"} dataset sizes`);
 
     try {
-        // First, we need to add some authors for foreign key references
-        await createInitialAuthors();
-
         // Test 1: Create 100,000 books in CSV (or reduced amount)
         console.log(`\n📊 TEST 1: Generate ${BOOKS_COUNT} books CSV`);
         timer.start("generate_large_books_csv");
@@ -68,7 +65,7 @@ async function runTests() {
         // Create the CSV header first
         fs.writeFileSync(
             largeBookCSV,
-            "id,isbn,title,autor_license,editorial,pages,year,genre,language,format,sinopsis,content\n"
+            "isbn,title,autor_license,editorial,pages,year,genre,language,format,sinopsis,content\n"
         );
 
         for (let i = 0; i < chunks; i++) {
@@ -158,139 +155,36 @@ async function runTests() {
     }
 }
 
-async function createInitialAuthors() {
-    timer.start("create_initial_authors");
-    const connection = await getConnection();
-
-    try {
-        // Generate a small set of authors first
-        const authors = generateAuthors(50);
-
-        // Store all licenses for later use when generating books
-        authors.forEach((author) => allAuthorLicenses.push(author.license));
-
-        // Insert authors
-        for (const author of authors) {
-            await connection.execute(
-                `INSERT INTO Autor (license, name, lastName, secondLastName, year) 
-         VALUES (?, ?, ?, ?, ?)`,
-                [
-                    author.license,
-                    author.name,
-                    author.lastName,
-                    author.secondLastName,
-                    author.year,
-                ]
-            );
-        }
-
-        console.log(`Created ${authors.length} initial authors`);
-    } catch (error) {
-        console.error("Error creating initial authors:", error);
-    } finally {
-        await connection.end();
-        timer.end("create_initial_authors");
-    }
-}
-
 async function insertBooksCSVIntoMySQL(csvFilePath) {
     timer.start("insert_large_books_csv");
 
     try {
         // Use a regular table instead of a temporary table since we're using multiple connections
         const connection = await getConnection();
-
         try {
-            console.log("Creating import table for books...");
-            // First drop the table if it exists
-            await connection.query(`DROP TABLE IF EXISTS import_libro`);
+            console.log(
+                "Loading CSV data directly into Libro using LOAD DATA INFILE..."
+            );
+            await connection.query(`SET FOREIGN_KEY_CHECKS = 0`);
 
-            // Create a regular table without foreign key constraints
             await connection.query(`
-        CREATE TABLE import_libro (
-          id INT AUTO_INCREMENT PRIMARY KEY,
-          ISBN VARCHAR(16) NOT NULL,
-          title VARCHAR(512) NOT NULL,
-          autor_license VARCHAR(12),
-          editorial TINYTEXT,
-          pages SMALLINT,
-          year SMALLINT NOT NULL,
-          genre TINYTEXT,
-          language TINYTEXT NOT NULL,
-          format TINYTEXT,
-          sinopsis TEXT,
-          content TEXT
-        )
-      `);
+                LOAD DATA INFILE '${csvFilePath.replace(/\\/g, "/")}'
+                INTO TABLE Libro
+                FIELDS TERMINATED BY ',' 
+                ENCLOSED BY '"'
+                LINES TERMINATED BY '\\n'
+                IGNORE 1 ROWS
+                (ISBN, title, autor_license, editorial, pages, year, genre, language, format, sinopsis, content)
+            `);
+
+            console.log("CSV data loaded successfully into Libro.");
         } finally {
             await connection.end();
         }
 
-        // Use the batch insert function
-        const mysqlOps = require("./utils/mysql-operations");
-        const fieldNames = [
-            "ISBN",
-            "title",
-            "autor_license",
-            "editorial",
-            "pages",
-            "year",
-            "genre",
-            "language",
-            "format",
-            "sinopsis",
-            "content",
-        ];
-
-        // Transform function to handle autor_license NULL values
-        const transform = (rowData, headers) => {
-            const values = [];
-            const idIndex = headers.findIndex((h) => h === "id");
-            let placeholders = [];
-
-            // Skip id column and map values for each field, handling NULL values for autor_license
-            fieldNames.forEach((field) => {
-                const idx = headers.findIndex(
-                    (h) => h.toLowerCase() === field.toLowerCase()
-                );
-                if (idx >= 0) {
-                    if (
-                        field === "autor_license" &&
-                        (!rowData[idx] || rowData[idx] === '""')
-                    ) {
-                        values.push(null);
-                    } else {
-                        values.push(rowData[idx]);
-                    }
-                    placeholders.push("?");
-                }
-            });
-
-            return { values, placeholders: placeholders.join(",") };
-        };
-
-        await mysqlOps.batchInsertFromCSV(
-            csvFilePath,
-            "import_libro",
-            fieldNames,
-            transform
-        );
-
-        // Now copy from import table to actual table with validation, handling duplicates
+        // Get count of inserted rows
         const connFinal = await getConnection();
         try {
-            // Use INSERT IGNORE to skip duplicates silently
-            await connFinal.query(`
-        INSERT IGNORE INTO Libro (ISBN, title, autor_license, editorial, pages, year, genre, language, format, sinopsis, content)
-        SELECT ISBN, title, autor_license, editorial, pages, year, genre, language, format, sinopsis, content
-        FROM import_libro
-        WHERE autor_license IS NULL OR autor_license IN (SELECT license FROM Autor)
-      `);
-
-            // Drop import table
-            await connFinal.query(`DROP TABLE import_libro`);
-
-            // Get count of inserted rows
             const [rows] = await connFinal.query(
                 `SELECT COUNT(*) as count FROM Libro`
             );
@@ -309,8 +203,9 @@ async function stressTestMySQL() {
     timer.start("stress_test_mysql");
     const connection = await getConnection();
     try {
+        await connection.query(`SET FOREIGN_KEY_CHECKS = 0`);
         // Generate books for stress testing
-        const stressBooks = generateBooks(STRESS_TEST_COUNT, allAuthorLicenses);
+        const stressBooks = generateBooks(STRESS_TEST_COUNT);
         // Use transaction for faster insertion
         await connection.beginTransaction();
         // Insert books in batches of 100
