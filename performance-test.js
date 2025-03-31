@@ -31,6 +31,7 @@ const largeBookCSV = path.join(tmpDir, "large_books.csv");
 const largeAuthorCSV = path.join(tmpDir, "large_authors.csv");
 const exportedBooksCSV = path.join(tmpDir, "exported_books.csv");
 const exportedAuthorsCSV = path.join(tmpDir, "exported_authors.csv");
+const megaBookCSV = path.join(tmpDir, "mega_books.csv");
 const allAuthorLicenses = [];
 
 // Check for reduced data flag
@@ -148,6 +149,14 @@ async function runTests() {
         // Test 12: Failed inserts with unauthorized users
         console.log("\n📊 TEST 12: Permission failure tests");
         await testPermissionFailures();
+
+        // Test 13: Generate and export limited
+        console.log("\n📊 TEST 13: Generate and export limited");
+        const millionbooks = await generateandExport();
+
+        // Test 14: Failed inserts with unauthorized users
+        console.log("\n📊 TEST 14: ImportOldBooks");
+        await importMysqlOldBooks(millionbooks);
     } catch (error) {
         console.error("Error running performance tests:", error);
     } finally {
@@ -595,6 +604,7 @@ async function migrateAndRestore() {
         timer.end("migrate_restore");
     }
 }
+
 function importCsvToMongo(database, collection, filePath, fields) {
     return new Promise((resolve, reject) => {
         const command = `${mongopath}\\mongoimport.exe --db ${database} --collection ${collection} --type csv --file "${filePath}" --fields "${fields}"`;
@@ -777,6 +787,139 @@ async function testPermissionFailures() {
         console.log("✅ UserC could not connect (expected)");
     }
     timer.end("userC_insert_book_fail");
+}
+
+async function generateandExport() {
+    const chunkSize = 10000;
+    const chunks = Math.ceil(1000000 / chunkSize);
+
+    fs.writeFileSync(
+        megaBookCSV,
+        "isbn,title,autor_license,editorial,pages,year,genre,language,format,sinopsis,content\n"
+    );
+
+    for (let i = 0; i < chunks; i++) {
+        const currentCount = Math.min(chunkSize, 1000000 - i * chunkSize);
+        console.log(
+            `Generating chunk ${i + 1}/${chunks} (${currentCount} books)`
+        );
+
+        const books = generateBooks(currentCount, i * chunkSize + 1);
+        const booksCSV = booksToCSV(books).split("\n").slice(1).join("\n");
+        fs.appendFileSync(megaBookCSV, booksCSV + "\n");
+    }
+    console.log("Importing to mongo");
+    try {
+        let mongoClient = null;
+        let connectionSuccessful = false;
+
+        const connectionOptions = [
+            config.mongo.uri,
+            "mongodb://localhost:27018/LibrosAutores",
+            "mongodb://localhost:27018/",
+        ];
+        for (const uri of connectionOptions) {
+            if (connectionSuccessful) break;
+            try {
+                console.log(
+                    `Attempting MongoDB connection with URI: ${uri.replace(
+                        /\/\/([^:]+):([^@]+)@/,
+                        "//\\1:***@"
+                    )}`
+                );
+                mongoClient = new MongoClient(uri, {
+                    serverSelectionTimeoutMS: 5000,
+                    connectTimeoutMS: 5000,
+                });
+                await mongoClient.connect();
+                console.log("MongoDB connection successful");
+                connectionSuccessful = true;
+            } catch (connErr) {
+                console.log(
+                    `Connection failed with URI: ${uri}. Error: ${connErr.message}`
+                );
+                if (mongoClient) await mongoClient.close();
+                mongoClient = null;
+            }
+        }
+
+        if (!connectionSuccessful) {
+            console.error(
+                "All MongoDB connection attempts failed. Using direct export approach instead."
+            );
+        }
+
+        const db = mongoClient.db(config.mongo.database || "LibrosAutores");
+        await db.dropCollection("Libros");
+        await importCsvToMongo(
+            "LibrosAutores",
+            "Libros",
+            megaBookCSV,
+            "ISBN, title, autor_license, editorial, pages, year, genre, language, format, sinopsis, content"
+        );
+        await mongoClient.close();
+
+        console.log(`Migrated books to MongoDB`);
+        const limitedbooksMongoCsvPath =
+            "C:/Users/cotto/tmp/limited_mongo_export.txt";
+
+        await exportMongoCollections(
+            "LibrosAutores",
+            "Libros",
+            limitedbooksMongoCsvPath,
+            "ISBN, pages, year"
+        );
+        console.log("exported limited csv");
+        return limitedbooksMongoCsvPath;
+    } catch (error) {
+        console.error("Error during migration and restoration:", error);
+    }
+}
+
+async function importMysqlOldBooks(old_file) {
+    try {
+        const connection = await getConnection();
+        try {
+            console.log(
+                "Loading CSV data directly into Libro using LOAD DATA INFILE..."
+            );
+            await connection.query(`SET FOREIGN_KEY_CHECKS = 0`);
+            await connection.query(`
+                CREATE TABLE IF NOT EXISTS old_books (
+                    id INT AUTO_INCREMENT PRIMARY KEY,
+                    ISBN VARCHAR(16),
+                    pages SMALLINT,
+                    year SMALLINT NOT NULL
+                )
+            `);
+            await connection.query(`
+                LOAD DATA INFILE '${old_file.replace(/\\/g, "/")}'
+                INTO TABLE old_books
+                FIELDS TERMINATED BY ',' 
+                ENCLOSED BY '"'
+                LINES TERMINATED BY '\\n'
+                IGNORE 2 ROWS
+                (ISBN, pages, year)
+            `);
+
+            console.log("CSV data loaded successfully into Libro.");
+        } finally {
+            await connection.end();
+        }
+
+        // Get count of inserted rows
+        const connFinal = await getConnection();
+        try {
+            const [rows] = await connFinal.query(
+                `SELECT COUNT(*) as count FROM old_books`
+            );
+            console.log(`Inserted ${rows[0].count} books from CSV`);
+        } finally {
+            await connFinal.end();
+        }
+    } catch (error) {
+        console.error("Error inserting books from CSV:", error);
+    }
 }
 
 function generatePerformanceReport(metrics) {
