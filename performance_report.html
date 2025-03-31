@@ -61,7 +61,7 @@
           <h1>MySQL Performance Test Results</h1>
           <div class="summary">
               <h2>Summary</h2>
-              <p><strong>Total Execution Time:</strong> 141888 ms (2.36 minutes)</p>
+              <p><strong>Total Execution Time:</strong> 341270 ms (5.69 minutes)</p>
           </div>
           <h2>Test Results</h2>
           <table>
@@ -76,74 +76,74 @@
                   
                       <tr>
                           <td>Generate Books CSV</td>
-                          <td>59527</td>
-                          <td>59.53</td>
+                          <td>51748</td>
+                          <td>51.75</td>
                       </tr>
                   
                       <tr>
                           <td>Insert CSV into MySQL</td>
-                          <td>11493</td>
-                          <td>11.49</td>
+                          <td>19101</td>
+                          <td>19.10</td>
                       </tr>
                   
                       <tr>
                           <td>Stress Test</td>
-                          <td>2093</td>
-                          <td>2.09</td>
+                          <td>2362</td>
+                          <td>2.36</td>
                       </tr>
                   
                       <tr>
                           <td>Generate CSV Files</td>
-                          <td>44822</td>
-                          <td>44.82</td>
+                          <td>42958</td>
+                          <td>42.96</td>
                       </tr>
                   
                       <tr>
                           <td>Insert Multiple CSV Files</td>
-                          <td>13275</td>
-                          <td>13.28</td>
+                          <td>26249</td>
+                          <td>26.25</td>
                       </tr>
                   
                       <tr>
                           <td>Complex Query Execution</td>
-                          <td>1837</td>
-                          <td>1.84</td>
+                          <td>1745</td>
+                          <td>1.75</td>
                       </tr>
                   
                       <tr>
                           <td>Generate & Insert Authors</td>
-                          <td>2651</td>
-                          <td>2.65</td>
+                          <td>3235</td>
+                          <td>3.23</td>
                       </tr>
                   
                       <tr>
                           <td>Export Tables to CSV</td>
-                          <td>5891</td>
-                          <td>5.89</td>
+                          <td>6225</td>
+                          <td>6.22</td>
                       </tr>
                   
                       <tr>
                           <td>Migrate & Restore MySQL/MongoDB</td>
-                          <td>111</td>
-                          <td>0.11</td>
+                          <td>109646</td>
+                          <td>109.65</td>
                       </tr>
                   
                       <tr>
                           <td>MySQL Database Dump</td>
-                          <td>3</td>
+                          <td>0</td>
                           <td>0.00</td>
                       </tr>
                   
                       <tr>
                           <td>MySQL Database Restore</td>
-                          <td>160</td>
-                          <td>0.16</td>
+                          <td>114</td>
+                          <td>0.11</td>
                       </tr>
                   
                       <tr>
                           <td>Permission Failure Tests</td>
-                          <td>16</td>
-                          <td>0.02</td>
+                          <td>15</td>
+                          <td>0.01</td>
                       </tr>
                   
               </tbody>
@@ -152,7 +152,7 @@
               <canvas id="performanceChart"></canvas>
           </div>
           <div class="footer">
-              <p>Generated on 3/30/2025, 9:14:23 PM</p>
+              <p>Generated on 3/31/2025, 1:11:15 AM</p>
           </div>
       </div>
       <script>
@@ -163,7 +163,7 @@
                   labels: ["Generate Books CSV","Insert CSV into MySQL","Stress Test","Generate CSV Files","Insert Multiple CSV Files","Complex Query Execution","Generate & Insert Authors","Export Tables to CSV","Migrate & Restore MySQL/MongoDB","MySQL Database Dump","MySQL Database Restore","Permission Failure Tests"],
                   datasets: [{
                       label: 'Execution Time (ms)',
-                      data: [59527,11493,2093,44822,13275,1837,2651,5891,111,3,160,16],
+                      data: [51748,19101,2362,42958,26249,1745,3235,6225,109646,0,114,15],
                       backgroundColor: 'rgba(54, 162, 235, 0.5)',
                       borderColor: 'rgba(54, 162, 235, 1)',
                       borderWidth: 1

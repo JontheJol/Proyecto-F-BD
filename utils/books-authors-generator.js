@@ -140,7 +140,7 @@ function generateBook(id = null) {
     const isbn = generateISBN();
     const title = randomText(randomNumber(5, 50));
     // If authorLicenses is empty, leave autor_license as null
-    const autorLicense = randomNumber(1, 150000);
+    const autorLicense = randomText(randomNumber(1, 12));
     const editorial = editorials[randomNumber(0, editorials.length - 1)];
     const pages = randomNumber(50, 1200);
     const year = randomNumber(1900, 2023);

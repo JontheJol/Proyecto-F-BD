@@ -1,6 +1,10 @@
 require("dotenv").config();
 const mysql = require("mysql2/promise");
 const { exec } = require("child_process");
+const mongopath =
+    ";C:\\Users\\cotto\\Documents\\mongoo\\mongodb-windows-x86_64-8.0.4\\mongodb-win32-x86_64-windows-8.0.4\\bin";
+const mysqlpath =
+    "C:\\Users\\cotto\\Documents\\bd\\mysql-9.1.0-winx64\\mysql-9.1.0-winx64\\bin";
 const fs = require("fs");
 const path = require("path");
 const Timer = require("./utils/timing");
@@ -514,9 +518,7 @@ async function migrateAndRestore() {
         await mongoClient.close();
         await connection.end();
 
-        console.log(
-            `Migrated ${books.length} books and ${authors.length} authors to MongoDB`
-        );
+        console.log(`Migrated books and authors to MongoDB`);
         timer.end("export_to_mongodb");
 
         // Step 2: Delete data from MySQL
@@ -531,84 +533,61 @@ async function migrateAndRestore() {
         await connDelete.end();
         timer.end("delete_from_mysql");
 
+        const authorsMongoCsvPath =
+            "C:/Users/cotto/tmp/autores_mongo_export.txt";
+        const booksMongoCsvPath = "C:/Users/cotto/tmp/libros_mongo_export.txt";
+
         // Step 3: Export from MongoDB (to temporary files)
-        await exportMongoCollectionsToJson(authorsJsonPath, booksJsonPath);
+        await exportMongoCollections(
+            "LibrosAutores",
+            "Libros",
+            booksMongoCsvPath,
+            "ISBN, title, autor_license, editorial, pages, year, genre, language, format, sinopsis, content"
+        );
+        await exportMongoCollections(
+            "LibrosAutores",
+            "Autores",
+            authorsMongoCsvPath,
+            "license, name, lastName, secondLastName, year"
+        );
         timer.end("export_from_mongodb");
 
         // Step 4: Restore to MySQL
         timer.start("restore_to_mysql");
 
-        if (!fs.existsSync(authorsJsonPath)) {
-            throw new Error(`Authors JSON file not found: ${authorsJsonPath}`);
-        }
-        if (!fs.existsSync(booksJsonPath)) {
-            throw new Error(`Books JSON file not found: ${booksJsonPath}`);
-        }
-
-        console.log(`Reading authors from ${authorsJsonPath}`);
-        const authorsJson = JSON.parse(
-            fs.readFileSync(authorsJsonPath, "utf-8")
-        );
-        console.log(`Reading books from ${booksJsonPath}`);
-        const booksJson = JSON.parse(fs.readFileSync(booksJsonPath, "utf-8"));
-
         const connRestore = await getConnection();
-
-        if (authorsJson.length > 0) {
-            const authorValues = authorsJson
-                .map(
-                    (author) =>
-                        `("${author.license}", "${author.name}", 
-          ${author.lastName ? `"${author.lastName}"` : "NULL"}, 
-          ${author.secondLastName ? `"${author.secondLastName}"` : "NULL"}, 
-          ${author.year || "NULL"})`
-                )
-                .join(",");
+        try {
+            console.log(
+                "Loading CSV data directly into Libro using LOAD DATA INFILE..."
+            );
+            await connRestore.query(`SET FOREIGN_KEY_CHECKS = 0`);
 
             await connRestore.query(`
-        INSERT INTO Autor (license, name, lastName, secondLastName, year) 
-        VALUES ${authorValues}
-      `);
+                LOAD DATA INFILE '${booksMongoCsvPath.replace(/\\/g, "/")}'
+                INTO TABLE Libro
+                FIELDS TERMINATED BY ',' 
+                ENCLOSED BY '"'
+                LINES TERMINATED BY '\\n'
+                IGNORE 1 ROWS
+                (ISBN, title, autor_license, editorial, pages, year, genre, language, format, sinopsis, content)
+            `);
+
+            console.log("CSV data loaded successfully into Libro.");
+
+            await connRestore.query(`
+                LOAD DATA INFILE '${authorsMongoCsvPath.replace(/\\/g, "/")}'
+                INTO TABLE Autor
+                FIELDS TERMINATED BY ',' 
+                ENCLOSED BY '"'
+                LINES TERMINATED BY '\\n'
+                IGNORE 1 ROWS
+                (license, name, lastName, secondLastName, year)
+            `);
+
+            console.log("CSV data loaded successfully into Author.");
+        } finally {
+            await connRestore.end();
         }
-
-        if (booksJson.length > 0) {
-            const batchSize = 1000;
-            for (let i = 0; i < booksJson.length; i += batchSize) {
-                const batch = booksJson.slice(i, i + batchSize);
-                const bookValues = batch
-                    .map(
-                        (book) =>
-                            `("${book.ISBN}", "${book.title}", 
-            ${book.autor_license ? `"${book.autor_license}"` : "NULL"}, 
-            ${book.editorial ? `"${book.editorial}"` : "NULL"}, 
-            ${book.pages || "NULL"}, ${book.year}, 
-            ${book.genre ? `"${book.genre}"` : "NULL"}, 
-            "${book.language}", 
-            ${book.format ? `"${book.format}"` : "NULL"}, 
-            ${
-                book.sinopsis
-                    ? `"${book.sinopsis.replace(/"/g, '\\"')}"`
-                    : "NULL"
-            }, 
-            ${
-                book.content ? `"${book.content.replace(/"/g, '\\"')}"` : "NULL"
-            })`
-                    )
-                    .join(",");
-
-                await connRestore.query(`
-          INSERT INTO Libro (ISBN, title, autor_license, editorial, pages, year, genre, language, format, sinopsis, content) 
-          VALUES ${bookValues}
-        `);
-                console.log(
-                    `Restored ${Math.min(i + batchSize, booksJson.length)} of ${
-                        booksJson.length
-                    } books`
-                );
-            }
-        }
-
-        await connRestore.end();
         timer.end("restore_to_mysql");
     } catch (error) {
         console.error("Error during migration and restoration:", error);
@@ -618,7 +597,7 @@ async function migrateAndRestore() {
 }
 function importCsvToMongo(database, collection, filePath, fields) {
     return new Promise((resolve, reject) => {
-        const command = `mongoimport --db ${database} --collection ${collection} --type csv --file "${filePath}" --fields "${fields}"`;
+        const command = `${mongopath}\\mongoimport.exe --db ${database} --collection ${collection} --type csv --file "${filePath}" --fields "${fields}"`;
 
         console.log(`🔄 Running command: ${command}`);
 
@@ -638,75 +617,28 @@ function importCsvToMongo(database, collection, filePath, fields) {
     });
 }
 
-async function exportMongoCollectionsToJson(authorsPath, booksPath) {
+async function exportMongoCollections(database, collection, filePath, fields) {
     timer.start("export_from_mongodb");
 
-    try {
-        let mongoClient = null;
-        let connectionSuccessful = false;
+    return new Promise((resolve, reject) => {
+        const command = `${mongopath}\\mongoexport.exe --db ${database} --collection ${collection} --type csv --fields "${fields}" --out "${filePath}"`;
 
-        const connectionOptions = [
-            config.mongo.uri,
-            "mongodb://localhost:27018/LibrosAutores",
-            "mongodb://localhost:27018/",
-        ];
+        console.log(`🔄 Running command: ${command}`);
 
-        for (const uri of connectionOptions) {
-            if (connectionSuccessful) break;
-            try {
-                console.log(
-                    `Attempting MongoDB connection with URI: ${uri.replace(
-                        /\/\/([^:]+):([^@]+)@/,
-                        "//\\1:***@"
-                    )}`
-                );
-                mongoClient = new MongoClient(uri, {
-                    serverSelectionTimeoutMS: 5000,
-                    connectTimeoutMS: 5000,
-                });
-                await mongoClient.connect();
-                console.log("MongoDB connection successful");
-                connectionSuccessful = true;
-            } catch (connErr) {
-                console.log(
-                    `Connection failed with URI: ${uri}. Error: ${connErr.message}`
-                );
-                if (mongoClient) await mongoClient.close();
-                mongoClient = null;
+        exec(command, (error, stdout, stderr) => {
+            if (error) {
+                console.error(`❌ Error exporting ${filePath}:`, error);
+                return reject(error);
             }
-        }
-
-        if (!connectionSuccessful) {
-            throw new Error("All MongoDB connection attempts failed");
-        }
-
-        const db = mongoClient.db(config.mongo.database || "LibrosAutores");
-
-        try {
-            const authors = await db.collection("Autores").find({}).toArray();
-            fs.writeFileSync(authorsPath, JSON.stringify(authors));
-            console.log(`Exported ${authors.length} authors to ${authorsPath}`);
-        } catch (err) {
-            console.error("Error exporting authors:", err.message);
-            fs.writeFileSync(authorsPath, "[]");
-        }
-
-        try {
-            const books = await db.collection("Libros").find({}).toArray();
-            fs.writeFileSync(booksPath, JSON.stringify(books));
-            console.log(`Exported ${books.length} books to ${booksPath}`);
-        } catch (err) {
-            console.error("Error exporting books:", err.message);
-            fs.writeFileSync(booksPath, "[]");
-        }
-
-        await mongoClient.close();
-    } catch (error) {
-        console.error("Error during direct MongoDB export:", error);
-        fs.writeFileSync(authorsPath, "[]");
-        fs.writeFileSync(booksPath, "[]");
-    }
-    return true;
+            if (stderr) {
+                console.warn(`⚠️ mongoexport warning for ${filePath}:`, stderr);
+            }
+            console.log(
+                `✅ Successfully exported ${filePath} into ${database}.${collection}`
+            );
+            resolve(stdout);
+        });
+    });
 }
 
 async function exportTablesDirectly() {
@@ -737,22 +669,23 @@ async function exportTablesDirectly() {
 
 async function mysqlDump() {
     timer.start("mysql_dump");
+    return new Promise((resolve, reject) => {
+        const command = `${mysqlpath}\\mysqldump.exe --user=${process.env.MYSQL_USER} --password=${process.env.MYSQL_PASSWORD} LibrosAutores --result-file=C:\\Users\\cotto\\tmp\\mysqldump.sql`;
 
-    const dumpProcess = new Process("mysqldump");
-    dumpProcess.ProcessArguments.push(`-h${config.mysql.host}`);
-    dumpProcess.ProcessArguments.push(`-u${config.mysql.user}`);
-    dumpProcess.ProcessArguments.push(`--password=${config.mysql.password}`);
-    dumpProcess.ProcessArguments.push(config.mysql.database);
-    dumpProcess.ProcessArguments.push("--result-file=full_database_dump.sql");
+        console.log(`🔄 Running command: ${command}`);
 
-    try {
-        await dumpProcess.ExecuteAsync(true);
-        console.log("MySQL database dump completed");
-    } catch (error) {
-        console.error("Error creating MySQL dump:", error);
-    } finally {
-        timer.end("mysql_dump");
-    }
+        exec(command, (error, stdout, stderr) => {
+            if (error) {
+                console.error(`❌ Error dumping database:`, error);
+                return reject(error);
+            }
+            if (stderr) {
+                console.warn(`⚠️ mysqldump warning for LibrosAutores:`, stderr);
+            }
+            console.log(`✅ Successfully dumped LibrosAutores`);
+            resolve(stdout);
+        });
+    });
 }
 
 async function mysqlRestore() {
@@ -770,20 +703,23 @@ async function mysqlRestore() {
         await connReset.query(`CREATE DATABASE ${config.mysql.database}`);
         await connReset.end();
 
-        const restoreProcess = new Process("mysql", {
-            shell: true,
-        });
-        restoreProcess.ProcessArguments.push(`-h${config.mysql.host}`);
-        restoreProcess.ProcessArguments.push(`-u${config.mysql.user}`);
-        restoreProcess.ProcessArguments.push(
-            `--password=${config.mysql.password}`
-        );
-        restoreProcess.ProcessArguments.push(
-            `${config.mysql.database} < full_database_dump.sql`
-        );
+        return new Promise((resolve, reject) => {
+            const command = `${mysqlpath}\\mysql.exe --user=${process.env.MYSQL_USER} --password=${process.env.MYSQL_PASSWORD} LibrosAutores < C:\\Users\\cotto\\tmp\\mysqldump.sql`;
 
-        await restoreProcess.ExecuteAsync(true);
-        console.log("MySQL database restore completed");
+            console.log(`🔄 Running command: ${command}`);
+
+            exec(command, (error, stdout, stderr) => {
+                if (error) {
+                    console.error(`❌ Error restoring database:`, error);
+                    return reject(error);
+                }
+                if (stderr) {
+                    console.warn(`⚠️ mysql warning for LibrosAutores:`, stderr);
+                }
+                console.log(`✅ Successfully imported LibrosAutores`);
+                resolve(stdout);
+            });
+        });
     } catch (error) {
         console.error("Error restoring MySQL dump:", error);
     } finally {
