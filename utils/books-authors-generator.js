@@ -113,7 +113,6 @@ function generateAuthor(id = null) {
     const year = randomNumber(1900, 2000);
 
     return {
-        id,
         license,
         name,
         lastName,
@@ -181,10 +180,10 @@ function generateBooks(count, startId = 1) {
  * Convert authors to CSV format
  */
 function authorsToCSV(authors) {
-    const headers = "id,license,name,lastName,secondLastName,year\n";
+    const headers = "license,name,lastName,secondLastName,year\n";
     const rows = authors
         .map((author) => {
-            return `${author.id || ""},"${author.license}","${author.name}","${
+            return `"${author.license}","${author.name}","${
                 author.lastName || ""
             }","${author.secondLastName || ""}",${author.year || ""}`;
         })
