@@ -547,6 +547,7 @@ async function migrateAndRestore() {
         const booksMongoCsvPath = "C:/Users/cotto/tmp/libros_mongo_export.txt";
 
         // Step 3: Export from MongoDB (to temporary files)
+        timer.start("export_from_mongodb");
         await exportMongoCollections(
             "LibrosAutores",
             "Libros",
@@ -628,8 +629,6 @@ function importCsvToMongo(database, collection, filePath, fields) {
 }
 
 async function exportMongoCollections(database, collection, filePath, fields) {
-    timer.start("export_from_mongodb");
-
     return new Promise((resolve, reject) => {
         const command = `${mongopath}\\mongoexport.exe --db ${database} --collection ${collection} --type csv --fields "${fields}" --out "${filePath}"`;
 
@@ -693,6 +692,7 @@ async function mysqlDump() {
                 console.warn(`⚠️ mysqldump warning for LibrosAutores:`, stderr);
             }
             console.log(`✅ Successfully dumped LibrosAutores`);
+            timer.end("mysql_dump");
             resolve(stdout);
         });
     });
@@ -727,13 +727,12 @@ async function mysqlRestore() {
                     console.warn(`⚠️ mysql warning for LibrosAutores:`, stderr);
                 }
                 console.log(`✅ Successfully imported LibrosAutores`);
+                timer.end("mysql_restore");
                 resolve(stdout);
             });
         });
     } catch (error) {
         console.error("Error restoring MySQL dump:", error);
-    } finally {
-        timer.end("mysql_restore");
     }
 }
 
